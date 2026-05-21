@@ -1,0 +1,51 @@
+{
+  "version": 1,
+  "canvas": { "width": 1290, "height": 2796, "background": "#1A0F2E" },
+  "assets": {
+    "shot": { "path": "screenshots/placeholder.png" }
+  },
+  "layers": [
+    {
+      "id": "title",
+      "type": "text",
+      "frame": [60, 140, 1170, 220],
+      "text": "Works on every screen",
+      "font": "Helvetica",
+      "fontSize": 90,
+      "fontWeight": "bold",
+      "color": "#FFFFFF",
+      "alignment": "center",
+      "zIndex": 10
+    },
+    {
+      "id": "phoneLeft",
+      "type": "deviceBezel",
+      "frame": [60, 700, 760, 1600],
+      "device": "iphone17Pro",
+      "screenshotAssetId": "shot",
+      "rotation": -6,
+      "zIndex": 4
+    },
+    {
+      "id": "phoneRight",
+      "type": "deviceBezel",
+      "frame": [520, 850, 760, 1600],
+      "device": "iphone17Pro",
+      "screenshotAssetId": "shot",
+      "rotation": 6,
+      "zIndex": 5
+    },
+    {
+      "id": "footer",
+      "type": "text",
+      "frame": [80, 2530, 1130, 160],
+      "text": "Now in beta.",
+      "font": "Helvetica",
+      "fontSize": 60,
+      "fontWeight": "medium",
+      "color": "#E0C8FF",
+      "alignment": "center",
+      "zIndex": 11
+    }
+  ]
+}

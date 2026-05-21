@@ -1,0 +1,136 @@
+[
+  {
+    "deviceId": "iphone17ProMax",
+    "title": "iPhone 17 Pro Max",
+    "family": "iphone",
+    "aspect": 0.49,
+    "viewBoxW": 490.0,
+    "viewBoxH": 1000.0,
+    "colors": {
+      "Cosmic orange": "iphone17ProMax--cosmic-orange.png",
+      "Deep blue": "iphone17ProMax--deep-blue.png",
+      "Silver": "iphone17ProMax--silver.png"
+    }
+  },
+  {
+    "deviceId": "iphone17Pro",
+    "title": "iPhone 17 Pro",
+    "family": "iphone",
+    "aspect": 0.4891304347826087,
+    "viewBoxW": 450.0,
+    "viewBoxH": 920.0,
+    "colors": {
+      "Cosmic orange": "iphone17Pro--cosmic-orange.png",
+      "Deep blue": "iphone17Pro--deep-blue.png",
+      "Silver": "iphone17Pro--silver.png"
+    }
+  },
+  {
+    "deviceId": "iphone17",
+    "title": "iPhone 17",
+    "family": "iphone",
+    "aspect": 0.4891304347826087,
+    "viewBoxW": 450.0,
+    "viewBoxH": 920.0,
+    "colors": {
+      "Black": "iphone17--black.png",
+      "Lavender": "iphone17--lavender.png",
+      "Mist blue": "iphone17--mist-blue.png",
+      "Sage": "iphone17--sage.png",
+      "White": "iphone17--white.png"
+    }
+  },
+  {
+    "deviceId": "iphone16ProMax",
+    "title": "iPhone 16 Pro Max",
+    "family": "iphone",
+    "aspect": 0.489,
+    "viewBoxW": 489.0,
+    "viewBoxH": 1000.0,
+    "colors": {
+      "Default": "iphone16ProMax--default.png"
+    }
+  },
+  {
+    "deviceId": "iphone16Pro",
+    "title": "iPhone 16 Pro",
+    "family": "iphone",
+    "aspect": 0.4891304347826087,
+    "viewBoxW": 450.0,
+    "viewBoxH": 920.0,
+    "colors": {
+      "Default": "iphone16Pro--default.png"
+    }
+  },
+  {
+    "deviceId": "iphone16Plus",
+    "title": "iPhone 16 Plus",
+    "family": "iphone",
+    "aspect": 0.494949494949495,
+    "viewBoxW": 490.0,
+    "viewBoxH": 990.0,
+    "colors": {
+      "Default": "iphone16Plus--default.png"
+    }
+  },
+  {
+    "deviceId": "iphone16",
+    "title": "iPhone 16",
+    "family": "iphone",
+    "aspect": 0.4967105263157895,
+    "viewBoxW": 453.0,
+    "viewBoxH": 912.0,
+    "colors": {
+      "Default": "iphone16--default.png"
+    }
+  },
+  {
+    "deviceId": "iphoneAir",
+    "title": "iPhone Air",
+    "family": "iphone",
+    "aspect": 0.4791666666666667,
+    "viewBoxW": 460.0,
+    "viewBoxH": 960.0,
+    "colors": {
+      "Cloud white": "iphoneAir--cloud-white.png",
+      "Light gold": "iphoneAir--light-gold.png",
+      "Sky blue": "iphoneAir--sky-blue.png",
+      "Space black": "iphoneAir--space-black.png"
+    }
+  },
+  {
+    "deviceId": "ipadProM413",
+    "title": "iPad Pro M4 13",
+    "family": "ipad",
+    "aspect": 1.3043478260869565,
+    "viewBoxW": 1500.0,
+    "viewBoxH": 1150.0,
+    "colors": {
+      "Silver": "ipadProM413--silver.png",
+      "Space grey": "ipadProM413--space-grey.png"
+    }
+  },
+  {
+    "deviceId": "ipadProM411",
+    "title": "iPad Pro M4 11",
+    "family": "ipad",
+    "aspect": 1.4042553191489362,
+    "viewBoxW": 1320.0,
+    "viewBoxH": 940.0,
+    "colors": {
+      "Silver": "ipadProM411--silver.png",
+      "Space grey": "ipadProM411--space-grey.png"
+    }
+  },
+  {
+    "deviceId": "ipadmini",
+    "title": "iPad mini",
+    "family": "ipad",
+    "aspect": 1.4325842696629214,
+    "viewBoxW": 1275.0,
+    "viewBoxH": 890.0,
+    "colors": {
+      "Default": "ipadmini--default.png"
+    }
+  }
+]

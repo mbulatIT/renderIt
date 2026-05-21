@@ -1,0 +1,40 @@
+{
+  "version": 1,
+  "canvas": { "width": 1290, "height": 2796, "background": "#0A0F2A" },
+  "assets": {},
+  "layers": [
+    {
+      "id": "title",
+      "type": "text",
+      "frame": [80, 220, 1130, 380],
+      "text": "Edit photos\nwith AI",
+      "font": "Helvetica",
+      "fontSize": 150,
+      "fontWeight": "bold",
+      "color": "#FFFFFF",
+      "alignment": "center",
+      "lineSpacing": 8,
+      "zIndex": 10
+    },
+    {
+      "id": "subtitle",
+      "type": "text",
+      "frame": [80, 650, 1130, 200],
+      "text": "Three taps. Studio-quality results.",
+      "font": "Helvetica",
+      "fontSize": 56,
+      "fontWeight": "regular",
+      "color": "#C5C9F0",
+      "alignment": "center",
+      "zIndex": 9
+    },
+    {
+      "id": "accent",
+      "type": "ellipse",
+      "frame": [120, 1700, 1050, 1050],
+      "fill": "#5B5EFF",
+      "opacity": 0.35,
+      "zIndex": 1
+    }
+  ]
+}

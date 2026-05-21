@@ -1,0 +1,20 @@
+{
+    "skipDangerousModePermissionPrompt": true,
+    "sandbox": {
+      "filesystem": {
+        "allowWrite": ["."]
+      },
+      "enabled": true,
+      "mode": "auto-allow",
+      "failIfUnavailable": true,
+      "autoAllowBashIfSandboxed": true,
+      "allowUnsandboxedCommands": true,
+      "network": {
+        "allowAllUnixSockets": true
+      }
+    },
+  "enabledMcpjsonServers": ["XcodeBuildMCP", "mempalace"],
+  "permissions": {
+    "defaultMode": "bypassPermissions"
+  }
+}

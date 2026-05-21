@@ -1,0 +1,29 @@
+{
+  "version": 1,
+  "canvas": { "width": 1290, "height": 2796, "background": "#11132F" },
+  "assets": {
+    "shot": { "path": "screenshots/placeholder.png" }
+  },
+  "layers": [
+    {
+      "id": "title",
+      "type": "text",
+      "frame": [80, 160, 1130, 260],
+      "text": "Designed for speed",
+      "font": "Helvetica",
+      "fontSize": 110,
+      "fontWeight": "bold",
+      "color": "#FFFFFF",
+      "alignment": "center",
+      "zIndex": 10
+    },
+    {
+      "id": "phone",
+      "type": "deviceBezel",
+      "frame": [195, 500, 900, 1900],
+      "device": "iphone16Pro",
+      "screenshotAssetId": "shot",
+      "zIndex": 5
+    }
+  ]
+}
