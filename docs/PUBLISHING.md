@@ -51,8 +51,14 @@ The script:
 1. `tuist generate` + Release builds of the app, CLI, and MCP server.
 2. Stages `AIImageEditor.app`, `aiimageeditor-cli`, `aiimageeditor-mcp` into `dist/stage/`.
 3. Signs everything with hardened runtime + secure timestamp.
-4. Packs a DMG, signs it, submits to Apple notarization (`notarytool --wait`),
-   staples the ticket, and runs a Gatekeeper self-check (`spctl`).
+4. Builds a read-write DMG and scripts Finder to apply the install-window
+   layout: background picture (`Packaging/dmg-background.tiff` — itself
+   rendered from `Packaging/dmg-background.aiproj` by `aiimageeditor-cli`),
+   icon positions, window size. Requires a GUI session; on first run macOS may
+   ask to allow your terminal to control Finder (Automation permission).
+5. Compresses to the final DMG, signs it, submits to Apple notarization
+   (`notarytool --wait`), staples the ticket, and runs a Gatekeeper self-check
+   (`spctl`).
 
 Output: `dist/AIImageEditor-<version>.dmg`. If the keychain holds more than one
 Developer ID identity, pass the exact one:
@@ -65,9 +71,10 @@ Developer ID identity, pass the exact one:
 2. Double-click `Install Command Line Tools.command` — it copies
    `aiimageeditor-cli` / `aiimageeditor-mcp` into `/usr/local/bin` (asks for
    the admin password once). If Gatekeeper balks at the script, right-click →
-   Open. Manual alternative:
+   Open. Manual alternative (the binaries sit in a hidden `.bin` folder to keep
+   the Finder window clean):
    ```bash
-   sudo cp /Volumes/AIImageEditor/aiimageeditor-{cli,mcp} /usr/local/bin/
+   sudo cp /Volumes/AIImageEditor/.bin/aiimageeditor-{cli,mcp} /usr/local/bin/
    ```
 3. Register the MCP server with an AI agent as usual — see
    [MCP_GUIDE.md](MCP_GUIDE.md) / [ONBOARDING.md](../ONBOARDING.md). No Xcode or

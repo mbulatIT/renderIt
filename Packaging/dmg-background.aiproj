@@ -1,0 +1,182 @@
+{
+  "activePageId" : "page-1",
+  "assets" : {
+
+  },
+  "pages" : [
+    {
+      "canvas" : {
+        "background" : "#F7F8FA",
+        "height" : 1680,
+        "width" : 3960
+      },
+      "id" : "page-1",
+      "layers" : [
+        {
+          "end" : [
+            0,
+            1
+          ],
+          "frame" : [
+            1320,
+            420,
+            1320,
+            840
+          ],
+          "id" : "bg",
+          "start" : [
+            0,
+            0
+          ],
+          "stops" : [
+            {
+              "at" : 0,
+              "color" : "#FBFCFD"
+            },
+            {
+              "at" : 1,
+              "color" : "#E9ECF2"
+            }
+          ],
+          "type" : "gradient",
+          "zIndex" : 1
+        },
+        {
+          "alignment" : "center",
+          "color" : "#111827",
+          "font" : "SF Pro Display",
+          "fontSize" : 42,
+          "fontWeight" : "semibold",
+          "frame" : [
+            1320,
+            464,
+            1320,
+            60
+          ],
+          "id" : "title",
+          "text" : "AIImageEditor",
+          "type" : "text",
+          "zIndex" : 2
+        },
+        {
+          "alignment" : "center",
+          "color" : "#6B7280",
+          "font" : "SF Pro Display",
+          "fontSize" : 22,
+          "fontWeight" : "regular",
+          "frame" : [
+            1320,
+            526,
+            1320,
+            36
+          ],
+          "id" : "subtitle",
+          "text" : "App Store screenshot editor — drive it from the GUI, CLI, or an AI agent (MCP)",
+          "type" : "text",
+          "zIndex" : 3
+        },
+        {
+          "arrowSize" : 3,
+          "color" : "#9AA3B2",
+          "end" : [
+            1,
+            0.5
+          ],
+          "endArrow" : true,
+          "frame" : [
+            1785,
+            692,
+            390,
+            56
+          ],
+          "id" : "arrow1",
+          "start" : [
+            0,
+            0.5
+          ],
+          "type" : "line",
+          "width" : 10,
+          "zIndex" : 4
+        },
+        {
+          "alignment" : "center",
+          "color" : "#4B5563",
+          "font" : "SF Pro Display",
+          "fontSize" : 22,
+          "fontWeight" : "regular",
+          "frame" : [
+            1750,
+            782,
+            460,
+            34
+          ],
+          "id" : "step1",
+          "text" : "1 — drag the app into Applications",
+          "type" : "text",
+          "zIndex" : 5
+        },
+        {
+          "alignment" : "center",
+          "color" : "#4B5563",
+          "font" : "SF Pro Display",
+          "fontSize" : 22,
+          "fontWeight" : "regular",
+          "frame" : [
+            1320,
+            888,
+            1320,
+            34
+          ],
+          "id" : "step2",
+          "text" : "2 — double-click to install the CLI & MCP tools for AI agents",
+          "type" : "text",
+          "zIndex" : 6
+        },
+        {
+          "arrowSize" : 2.5,
+          "color" : "#9AA3B2",
+          "end" : [
+            0.5,
+            1
+          ],
+          "endArrow" : true,
+          "frame" : [
+            1965,
+            928,
+            30,
+            26
+          ],
+          "id" : "arrow2",
+          "start" : [
+            0.5,
+            0
+          ],
+          "type" : "line",
+          "width" : 7,
+          "zIndex" : 7
+        }
+      ],
+      "layout" : {
+        "mode" : "row",
+        "previewHeight" : 840,
+        "previewWidth" : 1320,
+        "spacing" : 80
+      },
+      "name" : "Page 1",
+      "previews" : [
+        {
+          "background" : "#F7F8FA",
+          "frame" : [
+            1320,
+            420,
+            1320,
+            840
+          ],
+          "id" : "page-1-preview-1",
+          "name" : "Preview 1"
+        }
+      ]
+    }
+  ],
+  "version" : 2
+}
