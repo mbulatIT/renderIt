@@ -46,10 +46,35 @@ cp -R "$BUILD/AIImageEditor.app" "$STAGE/"
 cp "$BUILD/aiimageeditor_cli" "$STAGE/aiimageeditor-cli"
 cp "$BUILD/aiimageeditor_mcp" "$STAGE/aiimageeditor-mcp"
 
+# Drag-and-drop convenience: /Applications shortcut right next to the app.
+ln -s /Applications "$STAGE/Applications"
+
+# Double-clickable installer for the CLI tools — Finder can't drag into
+# /usr/local/bin (it doesn't even exist on a fresh macOS install).
+cat > "$STAGE/Install Command Line Tools.command" <<'CMD'
+#!/bin/bash
+set -euo pipefail
+DIR="$(cd "$(dirname "$0")" && pwd)"
+DEST=/usr/local/bin
+echo "Installing aiimageeditor-cli and aiimageeditor-mcp into $DEST"
+echo "(administrator password may be requested)"
+sudo mkdir -p "$DEST"
+sudo install -m 755 "$DIR/aiimageeditor-cli" "$DIR/aiimageeditor-mcp" "$DEST/"
+echo
+echo "Done. To let an AI agent drive the editor, register the MCP server:"
+echo "  claude mcp add aiimageeditor $DEST/aiimageeditor-mcp"
+echo "(see ONBOARDING.md for Claude Desktop / Cursor / other agents)"
+echo
+read -r -p "Press Enter to close..."
+CMD
+chmod +x "$STAGE/Install Command Line Tools.command"
+
 echo "==> Signing (hardened runtime + secure timestamp)"
 codesign --force --options runtime --timestamp --sign "$SIGN_ID" "$STAGE/aiimageeditor-cli"
 codesign --force --options runtime --timestamp --sign "$SIGN_ID" "$STAGE/aiimageeditor-mcp"
 codesign --force --options runtime --timestamp --sign "$SIGN_ID" "$STAGE/AIImageEditor.app"
+# Shell scripts carry their signature in extended attributes (no hardened runtime).
+codesign --force --timestamp --sign "$SIGN_ID" "$STAGE/Install Command Line Tools.command"
 codesign --verify --strict --verbose=2 "$STAGE/AIImageEditor.app"
 
 echo "==> Packaging DMG"

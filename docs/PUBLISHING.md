@@ -60,11 +60,14 @@ Developer ID identity, pass the exact one:
 
 ## Recipient install
 
-1. Open the DMG, drag `AIImageEditor.app` to Applications.
-2. Copy the CLI/MCP binaries onto `$PATH`:
+1. Open the DMG, drag `AIImageEditor.app` onto the bundled `Applications`
+   shortcut.
+2. Double-click `Install Command Line Tools.command` — it copies
+   `aiimageeditor-cli` / `aiimageeditor-mcp` into `/usr/local/bin` (asks for
+   the admin password once). If Gatekeeper balks at the script, right-click →
+   Open. Manual alternative:
    ```bash
-   sudo cp /Volumes/AIImageEditor/aiimageeditor-cli /usr/local/bin/
-   sudo cp /Volumes/AIImageEditor/aiimageeditor-mcp /usr/local/bin/
+   sudo cp /Volumes/AIImageEditor/aiimageeditor-{cli,mcp} /usr/local/bin/
    ```
 3. Register the MCP server with an AI agent as usual — see
    [MCP_GUIDE.md](MCP_GUIDE.md) / [ONBOARDING.md](../ONBOARDING.md). No Xcode or
