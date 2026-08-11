@@ -31,6 +31,25 @@ public enum EditorCommand {
     case addRect(pageId: String?, id: String?, payload: ShapeLayerPayload, frame: Frame, z: Double?)
     case addEllipse(pageId: String?, id: String?, payload: ShapeLayerPayload, frame: Frame, z: Double?)
     case addDeviceBezel(pageId: String?, id: String?, payload: DeviceBezelPayload, frame: Frame, z: Double?)
+    case addGradient(pageId: String?, id: String?, payload: GradientLayerPayload, frame: Frame, z: Double?)
+    case addBlur(pageId: String?, id: String?, payload: BlurLayerPayload, frame: Frame, z: Double?)
+    case addLine(pageId: String?, id: String?, payload: LineLayerPayload, frame: Frame, z: Double?)
+    case addPolygon(pageId: String?, id: String?, payload: PolygonLayerPayload, frame: Frame, z: Double?)
+    case addStar(pageId: String?, id: String?, payload: StarLayerPayload, frame: Frame, z: Double?)
+    /// Set or clear a layer's drop shadow. Applies uniformly to any layer kind (text, shape, image, bezel, gradient).
+    case setShadow(pageId: String?, id: String, shadow: Shadow?)
+    /// Set the corner radius applied to a layer. `0` disables corner rounding.
+    case setCornerRadius(pageId: String?, id: String, value: Double)
+    /// Set the corner-radius shape (arc/continuous/cut). Ignored when cornerRadius is 0.
+    case setCornerStyle(pageId: String?, id: String, style: CornerStyle)
+    /// Set which corners the cornerRadius rounds. Pass `.all` for every corner (the default), or a
+    /// subset to round only those. Ignored when cornerRadius is 0.
+    case setRoundedCorners(pageId: String?, id: String, corners: RectCorners)
+    /// Set or clear a layer's optional background fill (solid color or gradient).
+    case setLayerBackground(pageId: String?, id: String, background: LayerBackground?)
+    /// Set or clear a layer-level gradient fill. Passing nil clears it. Has no effect on
+    /// blur/deviceBezel/.gradient kind layers (those carry their own fill).
+    case setLayerGradient(pageId: String?, id: String, gradient: GradientLayerPayload?)
 
     // Position / shape / lifetime
     case move(pageId: String?, id: String, to: (Double, Double))
@@ -47,6 +66,22 @@ public enum EditorCommand {
     // Insert an existing-shaped layer (used by paste). Returns a new id if conflict.
     case insertLayer(pageId: String?, layer: Layer)
 
+    /// Bundle one or more existing layers into a new `group` layer. The group's frame is the
+    /// union of the children's frames. Children are removed from the top-level layer list and
+    /// become the group's nested children.
+    case addGroup(pageId: String?, id: String?, name: String?, childIds: [String])
+    /// Replace a group layer with its children promoted back to the top-level layer list.
+    case ungroup(pageId: String?, id: String)
+    /// Toggle whether a group crops its children's drawing to its frame bounds (the union of the
+    /// children's frames, respecting cornerRadius/cornerStyle). No-op on non-group layers.
+    case setGroupClipsToBounds(pageId: String?, id: String, value: Bool)
+    /// Relocate a layer within the page's layer tree. Pass `intoGroupId: nil` to promote the
+    /// layer to top-level, or a group id to nest it as a child of that group. Source location
+    /// (top-level vs nested) is detected automatically. If `beforeLayerId` is provided, the
+    /// layer is inserted before that sibling; otherwise it's appended at the end. Refuses to
+    /// move a group into itself or any of its descendants.
+    case moveLayer(pageId: String?, layerId: String, intoGroupId: String?, beforeLayerId: String?)
+
     // Text-only
     case setText(pageId: String?, id: String, text: String)
     case setFont(pageId: String?, id: String, family: String?, size: Double?, weight: FontWeight?, italic: Bool?)
@@ -56,6 +91,10 @@ public enum EditorCommand {
     case setBezelColor(pageId: String?, id: String, color: String?)
     /// Set / clear the screenshot drawn inside a device bezel. Pass nil for `assetId` to clear.
     case setBezelScreenshot(pageId: String?, id: String, assetId: String?)
+    /// Replace a gradient layer's payload wholesale.
+    case setGradientPayload(pageId: String?, id: String, payload: GradientLayerPayload)
+    /// Replace a blur layer's payload wholesale.
+    case setBlurPayload(pageId: String?, id: String, payload: BlurLayerPayload)
 
     // Z-order
     case setZIndex(pageId: String?, id: String, value: Double)
@@ -78,9 +117,22 @@ public struct EditorCommandResult: Sendable {
 
 public enum CommandEngine {
 
-    /// Apply a single command to a document.
+    /// Apply a single command to a document. After the underlying command runs, every page is
+    /// post-processed so each group's frame is the axis-aligned union of its current children
+    /// — that way groups stay glued to their contents through any add/remove/move/resize.
     @discardableResult
     public static func apply(_ command: EditorCommand, to doc: inout Document) throws -> EditorCommandResult {
+        let result = try applyCommand(command, to: &doc)
+        for i in 0..<doc.pages.count {
+            recomputeGroupFrames(in: &doc.pages[i].layers)
+        }
+        return result
+    }
+
+    /// Core command dispatch — kept private so the public entry point can run post-processing
+    /// uniformly after every mutation.
+    @discardableResult
+    private static func applyCommand(_ command: EditorCommand, to doc: inout Document) throws -> EditorCommandResult {
         switch command {
 
         // MARK: - Pages
@@ -290,6 +342,170 @@ public enum CommandEngine {
             }
             return .init(message: "added bezel \(newId)", newLayerId: newId, newPageId: pageId, newAssetId: nil)
 
+        case .addGradient(let pid, let id, let payload, let frame, let z):
+            let pageId = pid ?? doc.activePage.id
+            let newId = try uniqueLayerId(in: doc, pageId: pageId, suggested: id, prefix: "gradient")
+            try doc.updatePage(id: pageId) { page in
+                page.layers.append(.init(id: newId, kind: .gradient, frame: frame,
+                                         zIndex: z ?? (page.topZIndex + 1),
+                                         payload: .gradient(payload)))
+            }
+            return .init(message: "added gradient \(newId)", newLayerId: newId, newPageId: pageId, newAssetId: nil)
+
+        case .addLine(let pid, let id, let payload, let frame, let z):
+            let pageId = pid ?? doc.activePage.id
+            let newId = try uniqueLayerId(in: doc, pageId: pageId, suggested: id, prefix: "line")
+            try doc.updatePage(id: pageId) { page in
+                page.layers.append(.init(id: newId, kind: .line, frame: frame,
+                                         zIndex: z ?? (page.topZIndex + 1),
+                                         payload: .line(payload)))
+            }
+            return .init(message: "added line \(newId)", newLayerId: newId, newPageId: pageId, newAssetId: nil)
+
+        case .addPolygon(let pid, let id, let payload, let frame, let z):
+            let pageId = pid ?? doc.activePage.id
+            let newId = try uniqueLayerId(in: doc, pageId: pageId, suggested: id, prefix: "polygon")
+            try doc.updatePage(id: pageId) { page in
+                page.layers.append(.init(id: newId, kind: .polygon, frame: frame,
+                                         zIndex: z ?? (page.topZIndex + 1),
+                                         payload: .polygon(payload)))
+            }
+            return .init(message: "added polygon \(newId)", newLayerId: newId, newPageId: pageId, newAssetId: nil)
+
+        case .addStar(let pid, let id, let payload, let frame, let z):
+            let pageId = pid ?? doc.activePage.id
+            let newId = try uniqueLayerId(in: doc, pageId: pageId, suggested: id, prefix: "star")
+            try doc.updatePage(id: pageId) { page in
+                page.layers.append(.init(id: newId, kind: .star, frame: frame,
+                                         zIndex: z ?? (page.topZIndex + 1),
+                                         payload: .star(payload)))
+            }
+            return .init(message: "added star \(newId)", newLayerId: newId, newPageId: pageId, newAssetId: nil)
+
+        case .setCornerRadius(let pid, let id, let value):
+            try mutateLayer(in: &doc, pageId: pid, layerId: id) { $0.cornerRadius = max(0, value) }
+            return .init(message: "cornerRadius \(id) → \(value)",
+                         newLayerId: id, newPageId: nil, newAssetId: nil)
+
+        case .setCornerStyle(let pid, let id, let style):
+            try mutateLayer(in: &doc, pageId: pid, layerId: id) { $0.cornerStyle = style }
+            return .init(message: "cornerStyle \(id) → \(style.rawValue)",
+                         newLayerId: id, newPageId: nil, newAssetId: nil)
+
+        case .setRoundedCorners(let pid, let id, let corners):
+            try mutateLayer(in: &doc, pageId: pid, layerId: id) { $0.roundedCorners = corners }
+            let label = corners == .all ? "all" : (corners.isEmpty ? "none" : corners.names.joined(separator: ","))
+            return .init(message: "roundedCorners \(id) → \(label)",
+                         newLayerId: id, newPageId: nil, newAssetId: nil)
+
+        case .setLayerBackground(let pid, let id, let background):
+            try mutateLayer(in: &doc, pageId: pid, layerId: id) { $0.background = background }
+            return .init(message: "background \(id) → \(background == nil ? "(cleared)" : "set")",
+                         newLayerId: id, newPageId: nil, newAssetId: nil)
+
+        case .setLayerGradient(let pid, let id, let gradient):
+            try mutateLayer(in: &doc, pageId: pid, layerId: id) { $0.gradient = gradient }
+            return .init(message: "gradient \(id) → \(gradient == nil ? "(cleared)" : "set")",
+                         newLayerId: id, newPageId: nil, newAssetId: nil)
+
+        case .setShadow(let pid, let id, let shadow):
+            try mutateLayer(in: &doc, pageId: pid, layerId: id) { $0.shadow = shadow }
+            return .init(message: "shadow \(id) → \(shadow == nil ? "(cleared)" : "set")",
+                         newLayerId: id, newPageId: nil, newAssetId: nil)
+
+        case .addBlur(let pid, let id, let payload, let frame, let z):
+            let pageId = pid ?? doc.activePage.id
+            let newId = try uniqueLayerId(in: doc, pageId: pageId, suggested: id, prefix: "blur")
+            try doc.updatePage(id: pageId) { page in
+                page.layers.append(.init(id: newId, kind: .blur, frame: frame,
+                                         zIndex: z ?? (page.topZIndex + 1),
+                                         payload: .blur(payload)))
+            }
+            return .init(message: "added blur \(newId)", newLayerId: newId, newPageId: pageId, newAssetId: nil)
+
+        case .addGroup(let pid, let id, let name, let childIds):
+            let pageId = pid ?? doc.activePage.id
+            let groupId = try uniqueLayerId(in: doc, pageId: pageId, suggested: id, prefix: "group")
+            guard let page = doc.page(id: pageId) else {
+                throw EditorError.layerNotFound("page:\(pageId)")
+            }
+            // Validate up front — updatePage's closure can't throw.
+            let childSet = Set(childIds)
+            let extracted = page.layers.filter { childSet.contains($0.id) }
+            guard !extracted.isEmpty else {
+                throw EditorError.layerNotFound(childIds.joined(separator: ","))
+            }
+            var minX = Double.infinity, minY = Double.infinity
+            var maxX = -Double.infinity, maxY = -Double.infinity
+            for layer in extracted {
+                let f = layer.frame
+                minX = min(minX, f.x);       minY = min(minY, f.y)
+                maxX = max(maxX, f.x + f.w); maxY = max(maxY, f.y + f.h)
+            }
+            let frame = Frame(minX, minY, maxX - minX, maxY - minY)
+            try doc.updatePage(id: pageId) { page in
+                let remaining = page.layers.filter { !childSet.contains($0.id) }
+                let topZ = (remaining.map(\.zIndex).max() ?? 0) + 1
+                let group = Layer(id: groupId, name: name ?? groupId, kind: .group, frame: frame,
+                                  zIndex: topZ, payload: .group(.init(children: extracted)))
+                page.layers = remaining + [group]
+            }
+            return .init(message: "grouped \(extracted.count) layers → \(groupId)",
+                         newLayerId: groupId, newPageId: pageId, newAssetId: nil)
+
+        case .moveLayer(let pid, let layerId, let intoGroupId, let beforeLayerId):
+            let pageId = pid ?? doc.activePage.id
+            guard let page = doc.page(id: pageId) else {
+                throw EditorError.layerNotFound("page:\(pageId)")
+            }
+            // Detect cycle: target group cannot equal the moved layer or live inside it.
+            if let target = intoGroupId {
+                if target == layerId {
+                    throw EditorError.usage("cannot move \(layerId) into itself")
+                }
+                if isDescendant(target, ofGroupId: layerId, in: page.layers) {
+                    throw EditorError.usage("cannot move \(layerId) into its own descendant \(target)")
+                }
+            }
+            var found = false
+            try doc.updatePage(id: pageId) { page in
+                guard let extracted = extractLayer(from: &page.layers, id: layerId) else { return }
+                found = true
+                insertLayer(extracted, into: &page.layers, intoGroupId: intoGroupId, beforeLayerId: beforeLayerId)
+            }
+            if !found { throw EditorError.layerNotFound(layerId) }
+            return .init(message: "moved \(layerId) → \(intoGroupId ?? "(root)")",
+                         newLayerId: layerId, newPageId: pageId, newAssetId: nil)
+
+        case .ungroup(let pid, let id):
+            let pageId = pid ?? doc.activePage.id
+            guard let page = doc.page(id: pageId),
+                  let target = page.layer(id: id) else {
+                throw EditorError.layerNotFound(id)
+            }
+            guard case .group(let g) = target.payload else {
+                throw EditorError.usage("\(id) is not a group")
+            }
+            let baseZ = target.zIndex
+            try doc.updatePage(id: pageId) { page in
+                page.layers.removeAll { $0.id == id }
+                for child in g.children {
+                    var c = child
+                    c.zIndex = baseZ
+                    page.layers.append(c)
+                }
+            }
+            return .init(message: "ungrouped \(id) → \(g.children.count) layers",
+                         newLayerId: nil, newPageId: pageId, newAssetId: nil)
+
+        case .setGroupClipsToBounds(let pid, let id, let v):
+            try mutateLayer(in: &doc, pageId: pid, layerId: id) { l in
+                guard case .group(var g) = l.payload else { return }
+                g.clipsToBounds = v
+                l.payload = .group(g)
+            }
+            return .init(message: "clipToBounds \(id) → \(v)", newLayerId: id, newPageId: nil, newAssetId: nil)
+
         case .insertLayer(let pid, let layer):
             let pageId = pid ?? doc.activePage.id
             var l = layer
@@ -304,19 +520,30 @@ public enum CommandEngine {
 
         case .move(let pid, let id, let to):
             try mutateLayer(in: &doc, pageId: pid, layerId: id) { l in
+                let old = l.frame
                 l.frame.x = to.0; l.frame.y = to.1
+                // Groups: shift every nested child by the same delta (sx=sy=1 since w/h unchanged).
+                applyGroupFrameChange(&l, oldFrame: old)
             }
             return .init(message: "moved \(id)", newLayerId: id, newPageId: nil, newAssetId: nil)
 
         case .resize(let pid, let id, let w, let h):
             try mutateLayer(in: &doc, pageId: pid, layerId: id) { l in
+                let old = l.frame
                 if let w { l.frame.w = max(0, w) }
                 if let h { l.frame.h = max(0, h) }
+                // Groups: scale every nested child proportionally to the new dimensions.
+                applyGroupFrameChange(&l, oldFrame: old)
             }
             return .init(message: "resized \(id)", newLayerId: id, newPageId: nil, newAssetId: nil)
 
         case .setFrame(let pid, let id, let frame):
-            try mutateLayer(in: &doc, pageId: pid, layerId: id) { $0.frame = frame }
+            try mutateLayer(in: &doc, pageId: pid, layerId: id) { l in
+                let old = l.frame
+                l.frame = frame
+                // Groups: translate AND scale children to match the new frame.
+                applyGroupFrameChange(&l, oldFrame: old)
+            }
             return .init(message: "set frame on \(id)", newLayerId: id, newPageId: nil, newAssetId: nil)
 
         case .rotate(let pid, let id, let deg):
@@ -346,8 +573,15 @@ public enum CommandEngine {
             var copy = src
             copy.id = copyId
             copy.name = copyId
-            copy.frame.x += 20
-            copy.frame.y += 20
+            let dx = 20.0, dy = 20.0
+            copy.frame.x += dx
+            copy.frame.y += dy
+            // For groups, slide the children along with the group's frame so the duplicate is a
+            // faithful copy of the composition, just shifted by (dx, dy).
+            if case .group(var g) = copy.payload {
+                translate(layers: &g.children, dx: dx, dy: dy)
+                copy.payload = .group(g)
+            }
             try doc.updatePage(id: pageId) { page in
                 copy.zIndex = page.topZIndex + 1
                 page.layers.append(copy)
@@ -387,7 +621,11 @@ public enum CommandEngine {
                 case .rect(var p):       p.fill = color;  l.payload = .rect(p)
                 case .ellipse(var p):    p.fill = color;  l.payload = .ellipse(p)
                 case .deviceBezel(var p):p.chromeColor = color; l.payload = .deviceBezel(p)
-                case .image, .group: break
+                case .blur(var p):       p.tint = color;  l.payload = .blur(p)
+                case .line(var p):       p.color = color; l.payload = .line(p)
+                case .polygon(var p):    p.fill = color;  l.payload = .polygon(p)
+                case .star(var p):       p.fill = color;  l.payload = .star(p)
+                case .image, .group, .gradient: break
                 }
             }
             return .init(message: "set color on \(id) → \(color.hex)", newLayerId: id, newPageId: nil, newAssetId: nil)
@@ -404,6 +642,20 @@ public enum CommandEngine {
             }
             return .init(message: "bezel color \(id) → \(color ?? "default")",
                          newLayerId: id, newPageId: nil, newAssetId: nil)
+
+        case .setGradientPayload(let pid, let id, let payload):
+            try mutateLayer(in: &doc, pageId: pid, layerId: id) { l in
+                guard case .gradient = l.payload else { return }
+                l.payload = .gradient(payload)
+            }
+            return .init(message: "set gradient on \(id)", newLayerId: id, newPageId: nil, newAssetId: nil)
+
+        case .setBlurPayload(let pid, let id, let payload):
+            try mutateLayer(in: &doc, pageId: pid, layerId: id) { l in
+                guard case .blur = l.payload else { return }
+                l.payload = .blur(payload)
+            }
+            return .init(message: "set blur on \(id)", newLayerId: id, newPageId: nil, newAssetId: nil)
 
         case .setBezelScreenshot(let pid, let id, let assetId):
             if let aid = assetId, doc.assets[aid] == nil {
@@ -501,6 +753,149 @@ public enum CommandEngine {
             change(&p)
             l.payload = .text(p)
         }
+    }
+
+    /// Recursively shift every frame in `layers` by `(dx, dy)`. Walks into groups so deeply
+    /// nested children move with their ancestor.
+    private static func translate(layers: inout [Layer], dx: Double, dy: Double) {
+        for i in 0..<layers.count {
+            layers[i].frame.x += dx
+            layers[i].frame.y += dy
+            if case .group(var g) = layers[i].payload {
+                translate(layers: &g.children, dx: dx, dy: dy)
+                layers[i].payload = .group(g)
+            }
+        }
+    }
+
+    /// Propagate a frame change on a group layer to its children — translates by the (x, y)
+    /// delta and scales by the (w, h) ratio so the composite stretches with the group. Recurses
+    /// into nested groups so deeply-nested children also rescale. No-op on non-group layers.
+    private static func applyGroupFrameChange(_ layer: inout Layer, oldFrame: Frame) {
+        guard case .group(var g) = layer.payload else { return }
+        let new = layer.frame
+        let sx = oldFrame.w > 0 ? new.w / oldFrame.w : 1
+        let sy = oldFrame.h > 0 ? new.h / oldFrame.h : 1
+        for i in 0..<g.children.count {
+            let childOld = g.children[i].frame
+            let nx = new.x + (childOld.x - oldFrame.x) * sx
+            let ny = new.y + (childOld.y - oldFrame.y) * sy
+            let nw = childOld.w * sx
+            let nh = childOld.h * sy
+            g.children[i].frame = Frame(nx, ny, nw, nh)
+            applyGroupFrameChange(&g.children[i], oldFrame: childOld)
+        }
+        layer.payload = .group(g)
+    }
+
+    /// Walk a layer tree bottom-up and reset every group's frame to the axis-aligned union of
+    /// its children's frames. Called after every command so groups stay glued to whatever's
+    /// inside them — adds, removes, individual child moves, nested edits.
+    private static func recomputeGroupFrames(in layers: inout [Layer]) {
+        for i in 0..<layers.count {
+            if case .group(var g) = layers[i].payload {
+                recomputeGroupFrames(in: &g.children)
+                if !g.children.isEmpty {
+                    var minX = Double.infinity, minY = Double.infinity
+                    var maxX = -Double.infinity, maxY = -Double.infinity
+                    for child in g.children {
+                        let f = child.frame
+                        minX = min(minX, f.x);       minY = min(minY, f.y)
+                        maxX = max(maxX, f.x + f.w); maxY = max(maxY, f.y + f.h)
+                    }
+                    layers[i].frame = Frame(minX, minY, maxX - minX, maxY - minY)
+                }
+                layers[i].payload = .group(g)
+            }
+        }
+    }
+
+    /// Recursively find and remove a layer (by id) from a layer tree. Returns the extracted
+    /// layer if found anywhere — top-level or nested inside any group.
+    private static func extractLayer(from layers: inout [Layer], id: String) -> Layer? {
+        if let idx = layers.firstIndex(where: { $0.id == id }) {
+            return layers.remove(at: idx)
+        }
+        for i in 0..<layers.count {
+            if case .group(var g) = layers[i].payload {
+                if let found = extractLayer(from: &g.children, id: id) {
+                    layers[i].payload = .group(g)
+                    return found
+                }
+            }
+        }
+        return nil
+    }
+
+    /// Insert a layer either at the page's top level (when `intoGroupId` is nil or empty) or as
+    /// a child of `intoGroupId` anywhere in the tree. Falls back to a top-level append only
+    /// when called at the outermost layer; the recursive search uses `insertIntoGroup` so it
+    /// can fail cleanly without polluting intermediate group children.
+    private static func insertLayer(_ layer: Layer, into layers: inout [Layer],
+                                    intoGroupId: String?, beforeLayerId: String?) {
+        if let gid = intoGroupId, !gid.isEmpty {
+            if insertIntoGroup(layer, in: &layers, groupId: gid, beforeLayerId: beforeLayerId) {
+                return
+            }
+            // Target group not found in this subtree — append at the current top level.
+            layers.append(layer)
+        } else {
+            insertSibling(layer, into: &layers, beforeLayerId: beforeLayerId)
+        }
+    }
+
+    /// Recursive search-and-insert. Returns true if the named group was found and the layer
+    /// was added to it; false if the group is not in this subtree.
+    private static func insertIntoGroup(_ layer: Layer, in layers: inout [Layer],
+                                        groupId: String, beforeLayerId: String?) -> Bool {
+        for i in 0..<layers.count {
+            if layers[i].id == groupId, case .group(var g) = layers[i].payload {
+                insertSibling(layer, into: &g.children, beforeLayerId: beforeLayerId)
+                layers[i].payload = .group(g)
+                return true
+            }
+            if case .group(var g) = layers[i].payload {
+                if insertIntoGroup(layer, in: &g.children, groupId: groupId, beforeLayerId: beforeLayerId) {
+                    layers[i].payload = .group(g)
+                    return true
+                }
+            }
+        }
+        return false
+    }
+
+    private static func insertSibling(_ layer: Layer, into siblings: inout [Layer],
+                                      beforeLayerId: String?) {
+        if let beforeId = beforeLayerId,
+           let idx = siblings.firstIndex(where: { $0.id == beforeId }) {
+            siblings.insert(layer, at: idx)
+        } else {
+            siblings.append(layer)
+        }
+    }
+
+    /// True if `candidateId` lives inside the group `groupId`'s subtree (at any depth).
+    private static func isDescendant(_ candidateId: String, ofGroupId groupId: String,
+                                     in layers: [Layer]) -> Bool {
+        for layer in layers {
+            if layer.id == groupId, case .group(let g) = layer.payload {
+                return containsId(candidateId, in: g.children)
+            }
+            if case .group(let g) = layer.payload {
+                if isDescendant(candidateId, ofGroupId: groupId, in: g.children) { return true }
+            }
+        }
+        return false
+    }
+
+    private static func containsId(_ id: String, in layers: [Layer]) -> Bool {
+        for layer in layers {
+            if layer.id == id { return true }
+            if case .group(let g) = layer.payload {
+                if containsId(id, in: g.children) { return true }
+            }
+        }
+        return false
     }
 
     private static func shiftZ(in doc: inout Document,

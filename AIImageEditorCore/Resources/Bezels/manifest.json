@@ -111,6 +111,18 @@
     }
   },
   {
+    "deviceId": "ipadProM413Portrait",
+    "title": "iPad Pro M4 13 (Portrait)",
+    "family": "ipad",
+    "aspect": 0.7666666666666667,
+    "viewBoxW": 1150.0,
+    "viewBoxH": 1500.0,
+    "colors": {
+      "Silver": "ipadProM413Portrait--silver.png",
+      "Space grey": "ipadProM413Portrait--space-grey.png"
+    }
+  },
+  {
     "deviceId": "ipadProM411",
     "title": "iPad Pro M4 11",
     "family": "ipad",

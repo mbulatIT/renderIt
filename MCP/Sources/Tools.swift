@@ -180,37 +180,48 @@ enum Tools {
                     let frame = try frameFromArgs(args: args, canvas: doc.canvas,
                                                   defaultSize: (Double(doc.canvas.width) * 0.84,
                                                                 max(payload.fontSize * 1.4, 80)))
-                    return try CommandEngine.apply(
+                    let r = try CommandEngine.apply(
                         .addText(pageId: args.objectValue?["page"]?.stringValue, id: args.objectValue?["id"]?.stringValue,
                                  payload: payload, frame: frame,
                                  z: args.objectValue?["z"]?.doubleValue),
                         to: &doc)
+                    try applyCornerRadiusArg(args, doc: &doc, layerId: r.newLayerId)
+                    try applyShadowArg(args, doc: &doc, layerId: r.newLayerId)
+                    return r
                 }
             },
 
             tool("add_image",
-                 desc: "Add an image layer (asset must exist OR provide asset_path).",
+                 desc: "Add an image layer (asset must exist OR provide asset_path). By default the layer's frame matches the image's natural pixel size (capped to the canvas), and contentMode defaults to `stretch` so the image follows any later resize.",
                  schema: schema(props: imageSchema(), required: ["project"])) { args in
                 try mutateReturnId(args) { doc -> EditorCommandResult in
                     var assetId: String
+                    var assetPath: String?
                     if let a = args.objectValue?["asset"]?.stringValue {
-                        guard doc.assets[a] != nil else { throw EditorError.assetNotFound(a) }
+                        guard let asset = doc.assets[a] else { throw EditorError.assetNotFound(a) }
                         assetId = a
+                        assetPath = asset.path
                     } else if let p = args.objectValue?["asset_path"]?.stringValue {
                         assetId = CLIHelpers.autoAssetId(in: doc, path: p)
                         _ = try CommandEngine.apply(.addAsset(id: assetId, path: p), to: &doc)
+                        assetPath = p
                     } else {
                         throw EditorError.usage("asset or asset_path required")
                     }
-                    let frame = try frameFromArgs(args: args, canvas: doc.canvas,
-                                                  defaultSize: (Double(doc.canvas.width) * 0.6,
-                                                                Double(doc.canvas.height) * 0.3))
-                    let mode = ContentMode(rawValue: args.objectValue?["content_mode"]?.stringValue ?? "fit") ?? .fit
-                    return try CommandEngine.apply(
+                    let projectURL = URL(fileURLWithPath: try requireString(args, "project"))
+                    let defaultSize = MCPHelpers.naturalImageDefaultSize(assetPath: assetPath,
+                                                                        projectURL: projectURL,
+                                                                        canvas: doc.canvas)
+                    let frame = try frameFromArgs(args: args, canvas: doc.canvas, defaultSize: defaultSize)
+                    let mode = ContentMode(rawValue: args.objectValue?["content_mode"]?.stringValue ?? "stretch") ?? .stretch
+                    let r = try CommandEngine.apply(
                         .addImage(pageId: args.objectValue?["page"]?.stringValue, id: args.objectValue?["id"]?.stringValue,
                                   assetId: assetId, frame: frame, contentMode: mode,
                                   z: args.objectValue?["z"]?.doubleValue),
                         to: &doc)
+                    try applyCornerRadiusArg(args, doc: &doc, layerId: r.newLayerId)
+                    try applyShadowArg(args, doc: &doc, layerId: r.newLayerId)
+                    return r
                 }
             },
 
@@ -220,11 +231,15 @@ enum Tools {
                 try mutateReturnId(args) { doc -> EditorCommandResult in
                     let payload = try shapePayloadFromArgs(args, ellipse: false)
                     let frame = try frameFromArgs(args: args, canvas: doc.canvas, defaultSize: (200, 200))
-                    return try CommandEngine.apply(
+                    let r = try CommandEngine.apply(
                         .addRect(pageId: args.objectValue?["page"]?.stringValue, id: args.objectValue?["id"]?.stringValue,
                                  payload: payload, frame: frame,
                                  z: args.objectValue?["z"]?.doubleValue),
                         to: &doc)
+                    // For add_rect, "radius" is a legacy alias for "corner_radius".
+                    try applyCornerRadiusArg(args, doc: &doc, layerId: r.newLayerId, aliases: ["radius"])
+                    try applyShadowArg(args, doc: &doc, layerId: r.newLayerId)
+                    return r
                 }
             },
 
@@ -234,11 +249,307 @@ enum Tools {
                 try mutateReturnId(args) { doc -> EditorCommandResult in
                     let payload = try shapePayloadFromArgs(args, ellipse: true)
                     let frame = try frameFromArgs(args: args, canvas: doc.canvas, defaultSize: (200, 200))
-                    return try CommandEngine.apply(
+                    let r = try CommandEngine.apply(
                         .addEllipse(pageId: args.objectValue?["page"]?.stringValue, id: args.objectValue?["id"]?.stringValue,
                                     payload: payload, frame: frame,
                                     z: args.objectValue?["z"]?.doubleValue),
                         to: &doc)
+                    try applyShadowArg(args, doc: &doc, layerId: r.newLayerId)
+                    // cornerRadius is intentionally not applied on ellipses — they're already curved.
+                    return r
+                }
+            },
+
+            tool("add_line",
+                 desc: "Add a line layer. Start/end points are normalized 0..1 within the layer's frame. Optional arrowheads on either end.",
+                 schema: schema(props: lineSchema(), required: ["project"])) { args in
+                try mutateReturnId(args) { doc -> EditorCommandResult in
+                    let color: Color = try (args.objectValue?["color"]?.stringValue).map { try Color(hex: $0) } ?? .white
+                    let width = args.objectValue?["width"]?.doubleValue ?? 6
+                    let (sx, sy) = try point(args.objectValue?["start"]?.stringValue) ?? (0, 0.5)
+                    let (ex, ey) = try point(args.objectValue?["end"]?.stringValue) ?? (1, 0.5)
+                    let arrowKind = args.objectValue?["arrow"]?.stringValue?.lowercased() ?? "none"
+                    let startArrow = (arrowKind == "start" || arrowKind == "both")
+                    let endArrow = (arrowKind == "end" || arrowKind == "both")
+                    let arrowSize = args.objectValue?["arrow_size"]?.doubleValue ?? 4
+                    let payload = LineLayerPayload(color: color, width: width,
+                                                   startX: sx, startY: sy, endX: ex, endY: ey,
+                                                   startArrow: startArrow, endArrow: endArrow,
+                                                   arrowSize: arrowSize)
+                    let frame = try frameFromArgs(args: args, canvas: doc.canvas,
+                                                  defaultSize: (Double(doc.canvas.width) * 0.6, max(width, 8)))
+                    let r = try CommandEngine.apply(
+                        .addLine(pageId: args.objectValue?["page"]?.stringValue,
+                                 id: args.objectValue?["id"]?.stringValue,
+                                 payload: payload, frame: frame,
+                                 z: args.objectValue?["z"]?.doubleValue),
+                        to: &doc)
+                    try applyCornerRadiusArg(args, doc: &doc, layerId: r.newLayerId)
+                    try applyShadowArg(args, doc: &doc, layerId: r.newLayerId)
+                    return r
+                }
+            },
+
+            tool("add_polygon",
+                 desc: "Add a regular N-sided polygon (sides ≥ 3) inscribed in the frame.",
+                 schema: schema(props: polygonSchema(), required: ["project", "sides"])) { args in
+                try mutateReturnId(args) { doc -> EditorCommandResult in
+                    let sides = args.objectValue?["sides"]?.intValue ?? 6
+                    let fill: Color = try (args.objectValue?["fill"]?.stringValue).map { try Color(hex: $0) } ?? .white
+                    let stroke = try strokeFromArgs(args)
+                    let payload = PolygonLayerPayload(sides: sides, fill: fill, stroke: stroke)
+                    let frame = try frameFromArgs(args: args, canvas: doc.canvas, defaultSize: (300, 300))
+                    let r = try CommandEngine.apply(
+                        .addPolygon(pageId: args.objectValue?["page"]?.stringValue,
+                                    id: args.objectValue?["id"]?.stringValue,
+                                    payload: payload, frame: frame,
+                                    z: args.objectValue?["z"]?.doubleValue),
+                        to: &doc)
+                    try applyCornerRadiusArg(args, doc: &doc, layerId: r.newLayerId)
+                    try applyShadowArg(args, doc: &doc, layerId: r.newLayerId)
+                    return r
+                }
+            },
+
+            tool("add_star",
+                 desc: "Add an N-pointed star inscribed in the frame.",
+                 schema: schema(props: starSchema(), required: ["project"])) { args in
+                try mutateReturnId(args) { doc -> EditorCommandResult in
+                    let points = args.objectValue?["points"]?.intValue ?? 5
+                    let inner = args.objectValue?["inner_radius"]?.doubleValue ?? 0.4
+                    let fill: Color = try (args.objectValue?["fill"]?.stringValue).map { try Color(hex: $0) } ?? .white
+                    let stroke = try strokeFromArgs(args)
+                    let payload = StarLayerPayload(points: points, innerRadius: inner, fill: fill, stroke: stroke)
+                    let frame = try frameFromArgs(args: args, canvas: doc.canvas, defaultSize: (300, 300))
+                    let r = try CommandEngine.apply(
+                        .addStar(pageId: args.objectValue?["page"]?.stringValue,
+                                 id: args.objectValue?["id"]?.stringValue,
+                                 payload: payload, frame: frame,
+                                 z: args.objectValue?["z"]?.doubleValue),
+                        to: &doc)
+                    try applyCornerRadiusArg(args, doc: &doc, layerId: r.newLayerId)
+                    try applyShadowArg(args, doc: &doc, layerId: r.newLayerId)
+                    return r
+                }
+            },
+
+            simpleMutator("set_gradient",
+                          desc: "Set or clear a layer's gradient fill mask (turns any layer into a gradient-filled version of itself). Provide gradient params inline, or `clear: true`.",
+                          extra: [
+                            "type": stringSchema("linear or radial (default linear)"),
+                            "stops": .object([
+                                "type": .string("array"),
+                                "items": .object([
+                                    "type": .string("object"),
+                                    "properties": .object([
+                                        "color": stringSchema("#RRGGBB(AA)"),
+                                        "at": numberSchema("0..1"),
+                                    ]),
+                                ]),
+                            ]),
+                            "start": stringSchema("\"x,y\" normalized 0..1"),
+                            "end":   stringSchema("\"x,y\" normalized 0..1"),
+                            "clear": boolSchema("If true, clears the gradient."),
+                          ],
+                          required: ["project", "id"]) { args, doc, id in
+                let g: GradientLayerPayload?
+                if args.objectValue?["clear"]?.boolValue == true {
+                    g = nil
+                } else {
+                    g = try gradientPayloadFromArgs(args)
+                }
+                _ = try CommandEngine.apply(
+                    .setLayerGradient(pageId: args.objectValue?["page"]?.stringValue, id: id, gradient: g),
+                    to: &doc)
+            },
+
+            tool("group",
+                 desc: "Bundle existing layers into a new group. Provide `ids` as a JSON array of layer ids.",
+                 schema: schema(props: [
+                    "project": stringSchema("Path to .aiproj"),
+                    "ids": .object([
+                        "type": .string("array"),
+                        "description": .string("Layer ids to bundle into the group."),
+                        "items": stringSchema(),
+                    ]),
+                    "id": stringSchema("Optional id for the new group layer."),
+                    "name": stringSchema("Optional display name."),
+                    "page": stringSchema("Page id; default = active page."),
+                 ], required: ["project", "ids"])) { args in
+                try mutateReturnId(args) { doc -> EditorCommandResult in
+                    guard let raw = args.objectValue?["ids"]?.arrayValue else {
+                        throw EditorError.usage("`ids` must be a JSON array of layer ids")
+                    }
+                    let ids = raw.compactMap { $0.stringValue }
+                    guard !ids.isEmpty else { throw EditorError.usage("`ids` must list at least one layer id") }
+                    return try CommandEngine.apply(
+                        .addGroup(pageId: args.objectValue?["page"]?.stringValue,
+                                  id: args.objectValue?["id"]?.stringValue,
+                                  name: args.objectValue?["name"]?.stringValue,
+                                  childIds: ids),
+                        to: &doc)
+                }
+            },
+
+            simpleMutator("ungroup",
+                          desc: "Replace a group layer with its children promoted to the page's layer list.",
+                          extra: [:],
+                          required: ["project", "id"]) { args, doc, id in
+                _ = try CommandEngine.apply(.ungroup(pageId: args.objectValue?["page"]?.stringValue, id: id), to: &doc)
+            },
+
+            simpleMutator("set_group_clip",
+                          desc: "Crop a group's children to its frame bounds. Trims rotated children, fill-mode images, overflowing text and shadows that spill past the box. Combine with set_corner_radius for a rounded crop.",
+                          extra: ["value": boolSchema("true = crop children to the group's bounds (default); false = no clipping.")],
+                          required: ["project", "id", "value"]) { args, doc, id in
+                _ = try CommandEngine.apply(
+                    .setGroupClipsToBounds(pageId: args.objectValue?["page"]?.stringValue,
+                                           id: id, value: args.objectValue?["value"]?.boolValue ?? true),
+                    to: &doc)
+            },
+
+            simpleMutator("set_corner_radius",
+                          desc: "Set or clear a layer's corner radius. Use `0` to disable.",
+                          extra: ["value": numberSchema("Corner radius in canvas pixels (≥ 0).")],
+                          required: ["project", "id", "value"]) { args, doc, id in
+                let v = try requireDouble(args, "value")
+                _ = try CommandEngine.apply(
+                    .setCornerRadius(pageId: args.objectValue?["page"]?.stringValue, id: id, value: v),
+                    to: &doc)
+            },
+
+            simpleMutator("set_corner_style",
+                          desc: "Set a layer's corner-radius shape: arc (default quarter-circles), continuous (iOS squircle), or cut (45° chamfer).",
+                          extra: ["style": stringSchema("arc | continuous | cut")],
+                          required: ["project", "id", "style"]) { args, doc, id in
+                let raw = try requireString(args, "style").lowercased()
+                guard let style = CornerStyle(rawValue: raw) else {
+                    throw EditorError.usage("`style` expects arc | continuous | cut")
+                }
+                _ = try CommandEngine.apply(
+                    .setCornerStyle(pageId: args.objectValue?["page"]?.stringValue, id: id, style: style),
+                    to: &doc)
+            },
+
+            simpleMutator("set_corners",
+                          desc: "Choose which corners the cornerRadius rounds. Pass `corners` as a JSON array of any of: topLeft, topRight, bottomLeft, bottomRight (empty array = no corners rounded). Omit a corner to leave it square. No effect when cornerRadius is 0.",
+                          extra: ["corners": .object([
+                              "type": .string("array"),
+                              "description": .string("Corner names to round: topLeft/topRight/bottomLeft/bottomRight."),
+                              "items": stringSchema(),
+                          ])],
+                          required: ["project", "id", "corners"]) { args, doc, id in
+                guard let arr = args.objectValue?["corners"]?.arrayValue else {
+                    throw EditorError.usage("`corners` must be a JSON array of corner names")
+                }
+                let corners = RectCorners(names: arr.compactMap { $0.stringValue })
+                _ = try CommandEngine.apply(
+                    .setRoundedCorners(pageId: args.objectValue?["page"]?.stringValue, id: id, corners: corners),
+                    to: &doc)
+            },
+
+            simpleMutator("set_layer_background",
+                          desc: "Set or clear a layer's background fill (solid color OR gradient). Pass `color`, gradient fields (`type`/`stops`/`start`/`end`), or `clear: true`.",
+                          extra: [
+                            "color": stringSchema("#RRGGBB(AA) — for a solid-colour background."),
+                            "type": stringSchema("linear or radial — for a gradient background."),
+                            "stops": .object([
+                                "type": .string("array"),
+                                "items": .object([
+                                    "type": .string("object"),
+                                    "properties": .object([
+                                        "color": stringSchema("#RRGGBB(AA)"),
+                                        "at": numberSchema("0..1"),
+                                    ]),
+                                ]),
+                            ]),
+                            "start": stringSchema("\"x,y\" normalized 0..1"),
+                            "end":   stringSchema("\"x,y\" normalized 0..1"),
+                            "clear": boolSchema("If true, removes the background."),
+                          ],
+                          required: ["project", "id"]) { args, doc, id in
+                let bg: LayerBackground?
+                if args.objectValue?["clear"]?.boolValue == true {
+                    bg = nil
+                } else if let hex = args.objectValue?["color"]?.stringValue {
+                    bg = .color(try Color(hex: hex))
+                } else if args.objectValue?["stops"] != nil
+                          || args.objectValue?["type"] != nil
+                          || args.objectValue?["start"] != nil
+                          || args.objectValue?["end"] != nil {
+                    bg = .gradient(try gradientPayloadFromArgs(args))
+                } else {
+                    throw EditorError.usage("provide `color`, gradient fields (type/stops/start/end), or `clear: true`")
+                }
+                _ = try CommandEngine.apply(
+                    .setLayerBackground(pageId: args.objectValue?["page"]?.stringValue, id: id, background: bg),
+                    to: &doc)
+            },
+
+            simpleMutator("set_shadow",
+                          desc: "Set or clear a layer's drop shadow. Provide `shadow: \"color,dx,dy,blur\"` or `clear: true`.",
+                          extra: [
+                            "shadow": stringSchema("\"#RRGGBBAA,dx,dy,blur\""),
+                            "clear": boolSchema("If true, removes the shadow."),
+                          ],
+                          required: ["project", "id"]) { args, doc, id in
+                let shadow: Shadow?
+                if args.objectValue?["clear"]?.boolValue == true {
+                    shadow = nil
+                } else if let s = parseShadow(args.objectValue?["shadow"]?.stringValue) {
+                    shadow = s
+                } else {
+                    throw EditorError.usage("provide `shadow` (\"color,dx,dy,blur\") or `clear: true`")
+                }
+                _ = try CommandEngine.apply(
+                    .setShadow(pageId: args.objectValue?["page"]?.stringValue, id: id, shadow: shadow),
+                    to: &doc)
+            },
+
+            tool("add_gradient",
+                 desc: "Add a gradient layer (linear or radial). Provide stops as an array of {color, at}.",
+                 schema: schema(props: gradientSchema(), required: ["project"])) { args in
+                try mutateReturnId(args) { doc -> EditorCommandResult in
+                    let payload = try gradientPayloadFromArgs(args)
+                    let frame = try frameFromArgs(args: args, canvas: doc.canvas,
+                                                  defaultSize: (Double(doc.canvas.width), Double(doc.canvas.height)))
+                    let r = try CommandEngine.apply(
+                        .addGradient(pageId: args.objectValue?["page"]?.stringValue,
+                                     id: args.objectValue?["id"]?.stringValue,
+                                     payload: payload, frame: frame,
+                                     z: args.objectValue?["z"]?.doubleValue),
+                        to: &doc)
+                    try applyCornerRadiusArg(args, doc: &doc, layerId: r.newLayerId)
+                    try applyShadowArg(args, doc: &doc, layerId: r.newLayerId)
+                    return r
+                }
+            },
+
+            tool("add_blur",
+                 desc: "Add a Gaussian blur layer that frosts whatever sits underneath it. Provide `stops` as an array of {radius, at} to enable a variable-radius blur driven by keypoints (then `radius` is unused — each stop carries its own).",
+                 schema: schema(props: blurSchema(), required: ["project"])) { args in
+                try mutateReturnId(args) { doc -> EditorCommandResult in
+                    let radius = args.objectValue?["radius"]?.doubleValue ?? 24
+                    let tint: Color? = try (args.objectValue?["tint"]?.stringValue).map { try Color(hex: $0) }
+                    let stops: [BlurStop]? = try blurStopsFromArgs(args)
+                    let typeStr = args.objectValue?["type"]?.stringValue?.lowercased() ?? "linear"
+                    guard let gradientType = GradientType(rawValue: typeStr) else {
+                        throw EditorError.usage("`type` expects linear or radial")
+                    }
+                    let (sx, sy) = try point(args.objectValue?["start"]?.stringValue) ?? (0, 0)
+                    let (ex, ey) = try point(args.objectValue?["end"]?.stringValue)   ?? (0, 1)
+                    let payload = BlurLayerPayload(radius: radius, tint: tint,
+                                                   stops: stops, gradientType: gradientType,
+                                                   startX: sx, startY: sy, endX: ex, endY: ey)
+                    let frame = try frameFromArgs(args: args, canvas: doc.canvas, defaultSize: (400, 400))
+                    let r = try CommandEngine.apply(
+                        .addBlur(pageId: args.objectValue?["page"]?.stringValue,
+                                 id: args.objectValue?["id"]?.stringValue,
+                                 payload: payload, frame: frame,
+                                 z: args.objectValue?["z"]?.doubleValue),
+                        to: &doc)
+                    try applyCornerRadiusArg(args, doc: &doc, layerId: r.newLayerId)
+                    return r
                 }
             },
 
@@ -273,11 +584,13 @@ enum Tools {
                         let anchor = AnchorPosition(token: token) ?? .center
                         frame = anchor.frame(layerSize: (w, h), canvas: doc.canvas)
                     }
-                    return try CommandEngine.apply(
+                    let r = try CommandEngine.apply(
                         .addDeviceBezel(pageId: args.objectValue?["page"]?.stringValue, id: args.objectValue?["id"]?.stringValue,
                                         payload: payload, frame: frame,
                                         z: args.objectValue?["z"]?.doubleValue),
                         to: &doc)
+                    try applyShadowArg(args, doc: &doc, layerId: r.newLayerId)
+                    return r
                 }
             },
 
@@ -685,6 +998,16 @@ enum Tools {
         return .object(o)
     }
 
+    /// Schema fragment for the layer-level `shadow` arg accepted by every `add_*` tool.
+    private static var shadowProp: JSONValue {
+        stringSchema("\"color,dx,dy,blur\" — optional drop shadow attached on creation.")
+    }
+
+    /// Schema fragment for the layer-level `corner_radius` arg accepted by every `add_*` tool.
+    private static var cornerRadiusProp: JSONValue {
+        numberSchema("Rounded-corner radius in canvas pixels. No effect on ellipse/deviceBezel.")
+    }
+
     private static func textSchema() -> [String: JSONValue] {
         [
             "project": stringSchema("Path to .aiproj"),
@@ -702,6 +1025,8 @@ enum Tools {
             "size": stringSchema("\"w,h\" used with `at`."),
             "z": numberSchema(),
             "id": stringSchema("Optional layer id."),
+            "shadow": shadowProp,
+            "corner_radius": cornerRadiusProp,
         ]
     }
 
@@ -716,6 +1041,8 @@ enum Tools {
             "size": stringSchema("\"w,h\""),
             "z": numberSchema(),
             "id": stringSchema(),
+            "shadow": shadowProp,
+            "corner_radius": cornerRadiusProp,
         ]
     }
 
@@ -729,9 +1056,207 @@ enum Tools {
             "size": stringSchema(),
             "z": numberSchema(),
             "id": stringSchema(),
+            "shadow": shadowProp,
+            "corner_radius": cornerRadiusProp,
         ]
         if includeRadius { d["radius"] = numberSchema("Corner radius.") }
         return d
+    }
+
+    private static func lineSchema() -> [String: JSONValue] {
+        [
+            "project": stringSchema("Path to .aiproj"),
+            "color": stringSchema("#RRGGBB"),
+            "width": numberSchema("Stroke width in px."),
+            "start": stringSchema("\"x,y\" normalized 0..1 (default 0,0.5)"),
+            "end":   stringSchema("\"x,y\" normalized 0..1 (default 1,0.5)"),
+            "arrow": stringSchema("none|start|end|both"),
+            "arrow_size": numberSchema("Arrowhead size as a multiple of line width."),
+            "frame": stringSchema("\"x,y,w,h\""),
+            "at": stringSchema(),
+            "size": stringSchema(),
+            "z": numberSchema(),
+            "id": stringSchema(),
+            "shadow": stringSchema("\"color,dx,dy,blur\" — optional drop shadow."),
+            "corner_radius": cornerRadiusProp,
+        ]
+    }
+
+    private static func polygonSchema() -> [String: JSONValue] {
+        [
+            "project": stringSchema("Path to .aiproj"),
+            "sides": integerSchema("Number of sides (≥ 3)."),
+            "fill": stringSchema("#RRGGBB"),
+            "stroke": stringSchema("\"color,width\""),
+            "frame": stringSchema("\"x,y,w,h\""),
+            "at": stringSchema(),
+            "size": stringSchema(),
+            "z": numberSchema(),
+            "id": stringSchema(),
+            "shadow": stringSchema("\"color,dx,dy,blur\" — optional drop shadow."),
+            "corner_radius": cornerRadiusProp,
+        ]
+    }
+
+    private static func starSchema() -> [String: JSONValue] {
+        [
+            "project": stringSchema("Path to .aiproj"),
+            "points": integerSchema("Number of star points (≥ 3, default 5)."),
+            "inner_radius": numberSchema("Inner-radius fraction (0..1, default 0.4)."),
+            "fill": stringSchema("#RRGGBB"),
+            "stroke": stringSchema("\"color,width\""),
+            "frame": stringSchema("\"x,y,w,h\""),
+            "at": stringSchema(),
+            "size": stringSchema(),
+            "z": numberSchema(),
+            "id": stringSchema(),
+            "shadow": stringSchema("\"color,dx,dy,blur\" — optional drop shadow."),
+            "corner_radius": cornerRadiusProp,
+        ]
+    }
+
+    /// Parse a `"color,dx,dy,blur"` shadow spec. Returns nil if `s` is nil or malformed.
+    private static func parseShadow(_ s: String?) -> Shadow? {
+        guard let raw = s else { return nil }
+        let parts = raw.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
+        guard parts.count == 4,
+              let color = try? Color(hex: parts[0]),
+              let dx = Double(parts[1]), let dy = Double(parts[2]), let blur = Double(parts[3]) else {
+            return nil
+        }
+        return Shadow(color: color, offsetX: dx, offsetY: dy, blur: blur)
+    }
+
+    /// Reads optional `shadow` from args and attaches it to the just-created layer.
+    private static func applyShadowArg(_ args: JSONValue, doc: inout Document, layerId: String?) throws {
+        guard let id = layerId, let shadow = parseShadow(args.objectValue?["shadow"]?.stringValue) else { return }
+        _ = try CommandEngine.apply(
+            .setShadow(pageId: args.objectValue?["page"]?.stringValue, id: id, shadow: shadow),
+            to: &doc)
+    }
+
+    private static func strokeFromArgs(_ args: JSONValue) throws -> Stroke? {
+        guard let s = args.objectValue?["stroke"]?.stringValue else { return nil }
+        let parts = s.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
+        guard parts.count == 2, let c = try? Color(hex: parts[0]), let w = Double(parts[1]) else {
+            throw EditorError.usage("`stroke` expects 'color,width'")
+        }
+        return Stroke(color: c, width: w)
+    }
+
+    private static func gradientSchema() -> [String: JSONValue] {
+        [
+            "project": stringSchema("Path to .aiproj"),
+            "type": stringSchema("linear or radial (default linear)"),
+            "stops": .object([
+                "type": .string("array"),
+                "description": .string("Color stops. Each entry: {\"color\": \"#RRGGBB\", \"at\": 0..1}."),
+                "items": .object([
+                    "type": .string("object"),
+                    "properties": .object([
+                        "color": stringSchema("#RRGGBB or #RRGGBBAA"),
+                        "at": numberSchema("0..1"),
+                    ]),
+                    "required": .array([.string("color"), .string("at")]),
+                ]),
+            ]),
+            "start": stringSchema("\"x,y\" normalized 0..1 (default 0,0)"),
+            "end": stringSchema("\"x,y\" normalized 0..1 (default 0,1)"),
+            "corner_radius": numberSchema(),
+            "frame": stringSchema("\"x,y,w,h\""),
+            "at": stringSchema(),
+            "size": stringSchema(),
+            "z": numberSchema(),
+            "id": stringSchema(),
+            "shadow": shadowProp,
+            "corner_radius": cornerRadiusProp,
+        ]
+    }
+
+    private static func blurSchema() -> [String: JSONValue] {
+        [
+            "project": stringSchema("Path to .aiproj"),
+            "radius": numberSchema("Gaussian blur radius in px (default 24). Ignored when `stops` is set."),
+            "corner_radius": numberSchema("Rounded-corner mask radius."),
+            "tint": stringSchema("Optional #RRGGBBAA tint overlay drawn on top of the blur."),
+            "stops": .object([
+                "type": .string("array"),
+                "description": .string("Variable-radius keypoints. Each entry: {\"radius\": px, \"at\": 0..1}. Two or more entries enable gradient blur."),
+                "items": .object([
+                    "type": .string("object"),
+                    "properties": .object([
+                        "radius": numberSchema("Blur radius at this stop, in canvas pixels."),
+                        "at": numberSchema("Normalized position along the gradient (0..1)."),
+                    ]),
+                    "required": .array([.string("radius"), .string("at")]),
+                ]),
+            ]),
+            "type": stringSchema("Gradient direction for variable blur: linear (default) or radial."),
+            "start": stringSchema("\"x,y\" normalized 0..1 — gradient start point. Defaults to 0,0."),
+            "end":   stringSchema("\"x,y\" normalized 0..1 — gradient end point. Defaults to 0,1."),
+            "frame": stringSchema("\"x,y,w,h\""),
+            "at": stringSchema("Anchor token, e.g. \"center\" (this is the top-level frame anchor; the per-stop position is `stops[i].at`)."),
+            "size": stringSchema(),
+            "z": numberSchema(),
+            "id": stringSchema(),
+        ]
+    }
+
+    /// Parse `stops: [{ radius, at }, ...]` from MCP args. Returns nil if absent or empty.
+    private static func blurStopsFromArgs(_ args: JSONValue) throws -> [BlurStop]? {
+        guard let raw = args.objectValue?["stops"]?.arrayValue, !raw.isEmpty else { return nil }
+        var stops: [BlurStop] = []
+        for (i, entry) in raw.enumerated() {
+            guard let obj = entry.objectValue else {
+                throw EditorError.usage("stop \(i) must be an object")
+            }
+            guard let r = obj["radius"]?.doubleValue, r >= 0 else {
+                throw EditorError.usage("stop \(i) needs a non-negative `radius`")
+            }
+            let at: Double
+            if let v = obj["at"]?.doubleValue { at = v }
+            else if raw.count == 1 { at = 0 }
+            else { at = Double(i) / Double(raw.count - 1) }
+            stops.append(.init(radius: r, at: at))
+        }
+        return stops
+    }
+
+    private static func gradientPayloadFromArgs(_ args: JSONValue) throws -> GradientLayerPayload {
+        let typeStr = args.objectValue?["type"]?.stringValue?.lowercased() ?? "linear"
+        guard let type = GradientType(rawValue: typeStr) else {
+            throw EditorError.usage("`type` must be linear or radial")
+        }
+        var stops: [GradientStop] = []
+        if let raw = args.objectValue?["stops"]?.arrayValue {
+            for (i, entry) in raw.enumerated() {
+                guard let obj = entry.objectValue,
+                      let hex = obj["color"]?.stringValue else {
+                    throw EditorError.usage("stop \(i) missing `color`")
+                }
+                let color = try Color(hex: hex)
+                let at: Double
+                if let n = obj["at"]?.doubleValue { at = n }
+                else if raw.count == 1 { at = 0 }
+                else { at = Double(i) / Double(raw.count - 1) }
+                stops.append(.init(color: color, at: at))
+            }
+        }
+        if stops.isEmpty {
+            stops = [.init(color: .black, at: 0), .init(color: .white, at: 1)]
+        }
+        let (sx, sy) = try point(args.objectValue?["start"]?.stringValue) ?? (0, 0)
+        let (ex, ey) = try point(args.objectValue?["end"]?.stringValue) ?? (0, 1)
+        return GradientLayerPayload(type: type, stops: stops,
+                                    startX: sx, startY: sy,
+                                    endX: ex, endY: ey)
+    }
+
+    private static func point(_ s: String?) throws -> (Double, Double)? {
+        guard let s = s else { return nil }
+        let parts = s.split(whereSeparator: { ",x ".contains($0) }).compactMap { Double($0) }
+        guard parts.count == 2 else { throw EditorError.usage("expected 'x,y' got '\(s)'") }
+        return (parts[0], parts[1])
     }
 
     private static func bezelSchema() -> [String: JSONValue] {
@@ -747,6 +1272,8 @@ enum Tools {
             "height": numberSchema("Outer height; width is derived from device aspect."),
             "z": numberSchema(),
             "id": stringSchema(),
+            "shadow": shadowProp,
+            "corner_radius": cornerRadiusProp,
         ]
     }
 
@@ -791,8 +1318,25 @@ enum Tools {
             }
             stroke = Stroke(color: c, width: w)
         }
-        let radius = ellipse ? 0 : (args.objectValue?["radius"]?.doubleValue ?? 0)
-        return ShapeLayerPayload(fill: fill, stroke: stroke, cornerRadius: radius)
+        return ShapeLayerPayload(fill: fill, stroke: stroke)
+    }
+
+    /// `radius` is the legacy `add_rect` alias for `corner_radius`. After-add helper applies
+    /// whichever was supplied as the layer-level cornerRadius.
+    private static func applyCornerRadiusArg(_ args: JSONValue, doc: inout Document,
+                                             layerId: String?,
+                                             aliases: [String] = []) throws {
+        guard let id = layerId else { return }
+        var value: Double? = args.objectValue?["corner_radius"]?.doubleValue
+        if value == nil {
+            for k in aliases {
+                if let v = args.objectValue?[k]?.doubleValue { value = v; break }
+            }
+        }
+        guard let radius = value, radius > 0 else { return }
+        _ = try CommandEngine.apply(
+            .setCornerRadius(pageId: args.objectValue?["page"]?.stringValue, id: id, value: radius),
+            to: &doc)
     }
 
     // MARK: - Mutate helpers
@@ -825,6 +1369,27 @@ enum CLIHelpers {
         var i = 2
         while doc.assets["\(base)-\(i)"] != nil { i += 1 }
         return "\(base)-\(i)"
+    }
+}
+
+enum MCPHelpers {
+    /// Read the asset's pixel dimensions and downscale uniformly so neither side exceeds the
+    /// canvas. Returns the canvas-relative fallback if the asset can't be loaded.
+    static func naturalImageDefaultSize(assetPath: String?, projectURL: URL, canvas: Canvas) -> (Double, Double) {
+        let fallback = (Double(canvas.width) * 0.6, Double(canvas.height) * 0.3)
+        guard let path = assetPath else { return fallback }
+        let url: URL
+        if (path as NSString).isAbsolutePath {
+            url = URL(fileURLWithPath: path)
+        } else {
+            url = projectURL.deletingLastPathComponent().appendingPathComponent(path)
+        }
+        guard let cg = CGImageCache.shared.image(at: url) else { return fallback }
+        let imgW = Double(cg.width), imgH = Double(cg.height)
+        guard imgW > 0, imgH > 0 else { return fallback }
+        let maxW = Double(canvas.width), maxH = Double(canvas.height)
+        let s = min(maxW / imgW, maxH / imgH, 1.0)
+        return (imgW * s, imgH * s)
     }
 }
 

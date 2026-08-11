@@ -93,13 +93,16 @@ struct EditorView: View {
 
     private enum ZOrderAction { case front, back, forward, backward }
     private func handleZOrder(_ action: ZOrderAction) {
-        guard let id = document.selectedLayerId else { return }
+        let ids = document.selectedLayerIds
+        guard !ids.isEmpty else { return }
         let pid = document.selectedPageId
-        switch action {
-        case .front:    document.mutate(.bringToFront(pageId: pid, id: id))
-        case .back:     document.mutate(.sendToBack(pageId: pid, id: id))
-        case .forward:  document.mutate(.moveForward(pageId: pid, id: id))
-        case .backward: document.mutate(.moveBackward(pageId: pid, id: id))
+        for id in ids {
+            switch action {
+            case .front:    document.mutate(.bringToFront(pageId: pid, id: id))
+            case .back:     document.mutate(.sendToBack(pageId: pid, id: id))
+            case .forward:  document.mutate(.moveForward(pageId: pid, id: id))
+            case .backward: document.mutate(.moveBackward(pageId: pid, id: id))
+            }
         }
     }
 
@@ -122,9 +125,16 @@ struct EditorView: View {
         }
     }
     private func handleDuplicate() {
-        guard let id = document.selectedLayerId else { return }
-        let r = document.mutate(.duplicate(pageId: document.selectedPageId, id: id, newId: nil))
-        document.selectedLayerId = r?.newLayerId
+        let ids = document.selectedLayerIds
+        guard !ids.isEmpty else { return }
+        var newIds: Set<String> = []
+        for id in ids {
+            if let r = document.mutate(.duplicate(pageId: document.selectedPageId, id: id, newId: nil)),
+               let nid = r.newLayerId {
+                newIds.insert(nid)
+            }
+        }
+        if !newIds.isEmpty { document.selectedLayerIds = newIds }
     }
     private func selectPage(offset: Int) {
         let pages = document.document.pages
@@ -138,7 +148,22 @@ struct EditorView: View {
     private var toolbar: some ToolbarContent {
         ToolbarItemGroup {
             Button { addText() } label: { Label("Text", systemImage: "textformat") }
-            Button { addRect() } label: { Label("Rect", systemImage: "rectangle") }
+            Menu {
+                Button("Rectangle") { addRect() }
+                Button("Ellipse")   { addEllipse() }
+                Button("Line")      { addLine() }
+                Button("Arrow")     { addArrow() }
+                Divider()
+                Button("Triangle")  { addPolygon(sides: 3) }
+                Button("Pentagon")  { addPolygon(sides: 5) }
+                Button("Hexagon")   { addPolygon(sides: 6) }
+                Button("Octagon")   { addPolygon(sides: 8) }
+                Divider()
+                Button("Star (5-pt)") { addStar(points: 5) }
+                Button("Star (6-pt)") { addStar(points: 6) }
+            } label: { Label("Shape", systemImage: "rectangle.on.rectangle") }
+            Button { addGradient() } label: { Label("Gradient", systemImage: "square.righthalf.filled") }
+            Button { addBlur() } label: { Label("Blur", systemImage: "drop.halffull") }
             Menu {
                 ForEach(DeviceBezelCatalog.all, id: \.id) { bezel in
                     Button(bezel.title) { addBezel(bezel.id) }
@@ -173,10 +198,78 @@ struct EditorView: View {
 
     private func addRect() {
         let frame = Frame(100, 100, 400, 400)
-        let payload = ShapeLayerPayload(fill: (try? Color(hex: "#FFFFFF")) ?? .white,
-                                        stroke: nil, cornerRadius: 24)
+        let payload = ShapeLayerPayload(fill: (try? Color(hex: "#FFFFFF")) ?? .white, stroke: nil)
         let r = document.mutate(.addRect(pageId: document.selectedPageId, id: nil, payload: payload, frame: frame, z: nil))
+        if let id = r?.newLayerId {
+            document.mutate(.setCornerRadius(pageId: document.selectedPageId, id: id, value: 24))
+            document.selectedLayerId = id
+        }
+    }
+
+    private func addGradient() {
+        let cw = Double(canvas.width), ch = Double(canvas.height)
+        let frame = Frame(0, 0, cw, ch)
+        let payload = GradientLayerPayload(
+            type: .linear,
+            stops: [
+                .init(color: (try? Color(hex: "#1A1A2E")) ?? .black, at: 0),
+                .init(color: (try? Color(hex: "#16213E")) ?? .black, at: 1),
+            ],
+            startX: 0, startY: 0, endX: 0, endY: 1)
+        let r = document.mutate(.addGradient(pageId: document.selectedPageId, id: nil, payload: payload, frame: frame, z: nil))
         document.selectedLayerId = r?.newLayerId
+    }
+
+    private func addEllipse() {
+        let frame = Frame(100, 100, 400, 400)
+        let payload = ShapeLayerPayload(fill: (try? Color(hex: "#FFFFFF")) ?? .white, stroke: nil)
+        let r = document.mutate(.addEllipse(pageId: document.selectedPageId, id: nil, payload: payload, frame: frame, z: nil))
+        document.selectedLayerId = r?.newLayerId
+    }
+
+    private func addLine() {
+        let cw = Double(canvas.width)
+        let frame = Frame(cw * 0.1, 400, cw * 0.8, 8)
+        let payload = LineLayerPayload(color: (try? Color(hex: "#FFFFFF")) ?? .white,
+                                       width: 8, startX: 0, startY: 0.5, endX: 1, endY: 0.5)
+        let r = document.mutate(.addLine(pageId: document.selectedPageId, id: nil, payload: payload, frame: frame, z: nil))
+        document.selectedLayerId = r?.newLayerId
+    }
+
+    private func addArrow() {
+        let cw = Double(canvas.width)
+        let frame = Frame(cw * 0.1, 400, cw * 0.8, 80)
+        let payload = LineLayerPayload(color: (try? Color(hex: "#FFFFFF")) ?? .white,
+                                       width: 12, startX: 0, startY: 0.5, endX: 1, endY: 0.5,
+                                       startArrow: false, endArrow: true)
+        let r = document.mutate(.addLine(pageId: document.selectedPageId, id: nil, payload: payload, frame: frame, z: nil))
+        document.selectedLayerId = r?.newLayerId
+    }
+
+    private func addPolygon(sides: Int) {
+        let frame = Frame(100, 100, 400, 400)
+        let payload = PolygonLayerPayload(sides: sides, fill: (try? Color(hex: "#FFFFFF")) ?? .white)
+        let r = document.mutate(.addPolygon(pageId: document.selectedPageId, id: nil, payload: payload, frame: frame, z: nil))
+        document.selectedLayerId = r?.newLayerId
+    }
+
+    private func addStar(points: Int) {
+        let frame = Frame(100, 100, 400, 400)
+        let payload = StarLayerPayload(points: points, innerRadius: 0.4,
+                                       fill: (try? Color(hex: "#FFD60A")) ?? .white)
+        let r = document.mutate(.addStar(pageId: document.selectedPageId, id: nil, payload: payload, frame: frame, z: nil))
+        document.selectedLayerId = r?.newLayerId
+    }
+
+    private func addBlur() {
+        let cw = Double(canvas.width)
+        let frame = Frame(cw * 0.1, 200, cw * 0.8, 360)
+        let payload = BlurLayerPayload(radius: 32, tint: nil)
+        let r = document.mutate(.addBlur(pageId: document.selectedPageId, id: nil, payload: payload, frame: frame, z: nil))
+        if let id = r?.newLayerId {
+            document.mutate(.setCornerRadius(pageId: document.selectedPageId, id: id, value: 28))
+            document.selectedLayerId = id
+        }
     }
 
     private func addBezel(_ deviceId: String) {
@@ -197,16 +290,25 @@ struct EditorView: View {
         guard panel.runModal() == .OK, let url = panel.url else { return }
         let assetId = "asset-\(document.document.assets.count + 1)"
         _ = document.mutate(.addAsset(id: assetId, path: url.path))
-        let frame = Frame(100, 600, 600, 600)
+        // Frame = the image's natural pixel size (capped to the canvas). Place it at the
+        // canvas centre for visibility; users can drag/resize from there.
+        let natural = ProjectAssetHelper.naturalImageDefaultSize(fileURL: url, canvas: canvas)
+        let w = natural?.w ?? 600
+        let h = natural?.h ?? 600
+        let frame = Frame((Double(canvas.width) - w) / 2, (Double(canvas.height) - h) / 2, w, h)
+        // contentMode = .stretch so any subsequent resize follows the frame exactly.
         let r = document.mutate(.addImage(pageId: document.selectedPageId, id: nil, assetId: assetId,
-                                          frame: frame, contentMode: .fit, z: nil))
+                                          frame: frame, contentMode: .stretch, z: nil))
         document.selectedLayerId = r?.newLayerId
     }
 
     private func handleDelete() {
-        guard let id = document.selectedLayerId else { return }
-        document.mutate(.remove(pageId: document.selectedPageId, id: id))
-        document.selectedLayerId = nil
+        let ids = document.selectedLayerIds
+        guard !ids.isEmpty else { return }
+        for id in ids {
+            document.mutate(.remove(pageId: document.selectedPageId, id: id))
+        }
+        document.selectedLayerIds = []
     }
 }
 
@@ -388,17 +490,33 @@ struct KeyShortcutCatcher: NSViewRepresentable {
         }
 
         private func nudge(dx: Double, dy: Double, isRepeat: Bool, doc: ProjectDocument) {
-            guard let id = doc.selectedLayerId,
-                  let layer = doc.selectedPage.layer(id: id) else { return }
+            let ids = doc.selectedLayerIds
+            guard !ids.isEmpty else { return }
             // First press = one new undo entry. Auto-repeat ticks fold into the same entry.
             if !isRepeat { doc.beginUndoableEdit() }
             var working = doc.document
-            _ = try? CommandEngine.apply(
-                .move(pageId: doc.selectedPageId, id: id,
-                      to: (layer.frame.x + dx, layer.frame.y + dy)),
-                to: &working)
+            for id in ids {
+                guard let layer = findLayerInPage(id: id, doc: doc) else { continue }
+                _ = try? CommandEngine.apply(
+                    .move(pageId: doc.selectedPageId, id: id,
+                          to: (layer.frame.x + dx, layer.frame.y + dy)),
+                    to: &working)
+            }
             doc.objectWillChange.send()
             doc.document = working
+        }
+
+        /// Resolve a layer id against the active page, walking into groups so nested children
+        /// can still be nudged when multi-selected.
+        private func findLayerInPage(id: String, doc: ProjectDocument) -> Layer? {
+            func search(_ layers: [Layer]) -> Layer? {
+                for l in layers {
+                    if l.id == id { return l }
+                    if case .group(let g) = l.payload, let f = search(g.children) { return f }
+                }
+                return nil
+            }
+            return search(doc.selectedPage.layers)
         }
 
         private func cycleLayer(forward: Bool, doc: ProjectDocument) {

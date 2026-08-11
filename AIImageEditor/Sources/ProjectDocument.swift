@@ -9,10 +9,43 @@ final class ProjectDocument: ReferenceFileDocument {
     static var readableContentTypes: [UTType] { [.aiproj, .json] }
 
     @Published var document: Document {
-        didSet { lastChangeAt = Date() }
+        didSet {
+            lastChangeAt = Date()
+            // Monotonic change counter. The canvas render cache keys on this instead of a deep
+            // `Page ==` comparison, so the hot-path cache check is O(1) rather than O(layers).
+            revision &+= 1
+        }
     }
-    @Published var selectedLayerId: String?
+    /// Increments on every assignment to `document` (commands, drag ticks, undo/redo). Used as
+    /// a cheap render-cache key. Not `@Published` on purpose: every reader that needs it already
+    /// observes `document`, so it's always read fresh after a change without a second signal.
+    private(set) var revision: Int = 0
+    /// Set of currently-selected layer ids. Multi-selection-aware: empty = nothing selected,
+    /// one = single-layer selected, more = marquee/cmd-click multi-selection.
+    @Published var selectedLayerIds: Set<String> = []
     @Published var selectedPageId: String
+
+    /// Compatibility shim: behaves like the old single-selection field. Reads return the only
+    /// selected layer (nil if zero or many); writes replace the entire selection.
+    var selectedLayerId: String? {
+        get {
+            guard selectedLayerIds.count == 1 else { return nil }
+            return selectedLayerIds.first
+        }
+        set {
+            if let v = newValue { selectedLayerIds = [v] }
+            else { selectedLayerIds = [] }
+        }
+    }
+
+    /// True iff `id` is currently part of the selection.
+    func isSelected(_ id: String) -> Bool { selectedLayerIds.contains(id) }
+
+    /// Toggle `id` in/out of the selection. Used by Cmd-click on the canvas.
+    func toggleSelection(_ id: String) {
+        if selectedLayerIds.contains(id) { selectedLayerIds.remove(id) }
+        else { selectedLayerIds.insert(id) }
+    }
 
     // MARK: - Undo / redo
 

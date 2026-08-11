@@ -18,4 +18,16 @@ enum ProjectAssetHelper {
         while doc.assets["\(base)-\(i)"] != nil { i += 1 }
         return "\(base)-\(i)"
     }
+
+    /// Read an image's natural pixel size and downscale uniformly so neither side exceeds the
+    /// canvas — used as the default frame size when adding an image to the page. Returns nil
+    /// if the file can't be loaded; callers should pick a sensible fallback.
+    static func naturalImageDefaultSize(fileURL: URL, canvas: Canvas) -> (w: Double, h: Double)? {
+        guard let cg = CGImageCache.shared.image(at: fileURL) else { return nil }
+        let imgW = Double(cg.width), imgH = Double(cg.height)
+        guard imgW > 0, imgH > 0 else { return nil }
+        let maxW = Double(canvas.width), maxH = Double(canvas.height)
+        let s = min(maxW / imgW, maxH / imgH, 1.0)
+        return (imgW * s, imgH * s)
+    }
 }

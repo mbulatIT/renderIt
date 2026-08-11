@@ -22,6 +22,23 @@ enum CLI {
             case "add-rect":             try cmdAddRect(rest)
             case "add-ellipse":          try cmdAddEllipse(rest)
             case "add-bezel":            try cmdAddBezel(rest)
+            case "add-gradient":         try cmdAddGradient(rest)
+            case "add-blur":             try cmdAddBlur(rest)
+            case "add-line":             try cmdAddLine(rest)
+            case "add-polygon":          try cmdAddPolygon(rest)
+            case "add-star":             try cmdAddStar(rest)
+            case "set-shadow":           try cmdSetShadow(rest)
+            case "set-corner-radius":    try cmdSetCornerRadius(rest)
+            case "set-corner-style":     try cmdSetCornerStyle(rest)
+            case "set-corners":          try cmdSetCorners(rest)
+            case "set-layer-bg",
+                 "set-layer-background": try cmdSetLayerBackground(rest)
+            case "set-gradient":         try cmdSetLayerGradient(rest)
+            case "group":                try cmdGroup(rest)
+            case "ungroup":              try cmdUngroup(rest)
+            case "set-group-clip",
+                 "crop-to-bounds":       try cmdSetGroupClip(rest)
+            case "move-layer":           try cmdMoveLayer(rest)
             case "move":                 try cmdMove(rest)
             case "resize":               try cmdResize(rest)
             case "set-frame":            try cmdSetFrame(rest)
@@ -375,23 +392,53 @@ enum CLI {
         let args = Args(argv)
         var (doc, url) = try loadDoc(args)
         var assetId: String
+        var assetPath: String?
         if let a = args.string("asset") {
-            guard doc.assets[a] != nil else { throw EditorError.assetNotFound(a) }
+            guard let asset = doc.assets[a] else { throw EditorError.assetNotFound(a) }
             assetId = a
+            assetPath = asset.path
         } else if let path = args.string("asset-path") {
             assetId = autoAssetId(in: doc, path: path)
             _ = try CommandEngine.apply(.addAsset(id: assetId, path: path), to: &doc)
+            assetPath = path
         } else {
             throw EditorError.usage("--asset <id> or --asset-path <file>")
         }
         let canvas = canvasForFrame(args, doc: doc)
-        let frame = try Parse.frame(args: args, canvas: canvas, defaultSize: (Double(canvas.width) * 0.6, Double(canvas.height) * 0.3))
-        let mode = Parse.contentMode(args: args)
+        // Default frame size = the image's natural pixel dimensions (capped so it doesn't
+        // exceed the canvas). Falls back to the historic 60%×30% rectangle only when the
+        // asset can't be loaded.
+        let defaultSize = naturalImageDefaultSize(assetPath: assetPath, projectURL: url, canvas: canvas)
+        let frame = try Parse.frame(args: args, canvas: canvas, defaultSize: defaultSize)
+        // Default contentMode = .stretch so that any subsequent resize of the frame follows
+        // the image exactly. Users who want aspect-locked fit/fill can opt in via --content-mode.
+        let mode = Parse.contentMode(args: args, default: .stretch)
         let r = try CommandEngine.apply(
             .addImage(pageId: args.string("page"), id: args.string("id"), assetId: assetId, frame: frame, contentMode: mode, z: try args.double("z")),
             to: &doc)
+        try applyCornerRadiusFlag(args: args, doc: &doc, layerId: r.newLayerId)
+        try applyShadowFlag(args: args, doc: &doc, layerId: r.newLayerId)
         try saveDoc(doc, to: url)
         ok(r.newLayerId ?? r.message)
+    }
+
+    /// Read the asset's pixel dimensions, downscale uniformly so neither side exceeds the
+    /// canvas. Returns the canvas-relative fallback if the asset can't be loaded.
+    private static func naturalImageDefaultSize(assetPath: String?, projectURL: URL, canvas: Canvas) -> (Double, Double) {
+        let fallback = (Double(canvas.width) * 0.6, Double(canvas.height) * 0.3)
+        guard let path = assetPath else { return fallback }
+        let url: URL
+        if (path as NSString).isAbsolutePath {
+            url = URL(fileURLWithPath: path)
+        } else {
+            url = projectURL.deletingLastPathComponent().appendingPathComponent(path)
+        }
+        guard let cg = CGImageCache.shared.image(at: url) else { return fallback }
+        let imgW = Double(cg.width), imgH = Double(cg.height)
+        guard imgW > 0, imgH > 0 else { return fallback }
+        let maxW = Double(canvas.width), maxH = Double(canvas.height)
+        let s = min(maxW / imgW, maxH / imgH, 1.0)
+        return (imgW * s, imgH * s)
     }
 
     private static func cmdAddText(_ argv: [String]) throws {
@@ -408,8 +455,7 @@ enum CLI {
             color: Parse.color(args: args, key: "color", default: .white),
             alignment: Parse.alignment(args: args),
             lineSpacing: (try args.double("line-spacing")) ?? 0,
-            kerning: (try args.double("kerning")) ?? 0,
-            shadow: Parse.shadow(args: args))
+            kerning: (try args.double("kerning")) ?? 0)
         let canvas = canvasForFrame(args, doc: doc)
         let estW = Double(canvas.width) * 0.84
         let estH = max(size * 1.4, 80)
@@ -417,29 +463,46 @@ enum CLI {
         let r = try CommandEngine.apply(
             .addText(pageId: args.string("page"), id: args.string("id"), payload: payload, frame: frame, z: try args.double("z")),
             to: &doc)
+        try applyCornerRadiusFlag(args: args, doc: &doc, layerId: r.newLayerId)
+        try applyShadowFlag(args: args, doc: &doc, layerId: r.newLayerId)
         try saveDoc(doc, to: url)
         ok(r.newLayerId ?? r.message)
+    }
+
+    /// If `--shadow "color,dx,dy,blur"` was provided and we have a new layer id, apply it.
+    private static func applyShadowFlag(args: Args, doc: inout Document, layerId: String?) throws {
+        guard let id = layerId, let shadow = Parse.shadow(args: args) else { return }
+        _ = try CommandEngine.apply(.setShadow(pageId: args.string("page"), id: id, shadow: shadow), to: &doc)
+    }
+
+    /// If `--corner-radius N` (or any of the supplied legacy aliases like `--radius`) was
+    /// provided and we have a new layer id, apply it as the layer-level corner radius.
+    private static func applyCornerRadiusFlag(args: Args, doc: inout Document, layerId: String?,
+                                              aliases: [String] = []) throws {
+        guard let id = layerId else { return }
+        var value: Double? = try args.double("corner-radius")
+        if value == nil {
+            for k in aliases {
+                if let v = try args.double(k) { value = v; break }
+            }
+        }
+        guard let radius = value, radius > 0 else { return }
+        _ = try CommandEngine.apply(.setCornerRadius(pageId: args.string("page"), id: id, value: radius), to: &doc)
     }
 
     private static func cmdAddRect(_ argv: [String]) throws {
         let args = Args(argv)
         var (doc, url) = try loadDoc(args)
         let fill = Parse.color(args: args, key: "fill", default: .white)
-        var stroke: Stroke? = nil
-        if let s = args.string("stroke") {
-            let parts = s.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
-            guard parts.count == 2, let c = try? Color(hex: parts[0]), let w = Double(parts[1]) else {
-                throw EditorError.usage("--stroke expects 'color,width'")
-            }
-            stroke = Stroke(color: c, width: w)
-        }
-        let radius = (try args.double("radius")) ?? 0
+        let stroke = try Parse.stroke(args: args)
         let canvas = canvasForFrame(args, doc: doc)
         let frame = try Parse.frame(args: args, canvas: canvas, defaultSize: (200, 200))
-        let payload = ShapeLayerPayload(fill: fill, stroke: stroke, cornerRadius: radius)
+        let payload = ShapeLayerPayload(fill: fill, stroke: stroke)
         let r = try CommandEngine.apply(
             .addRect(pageId: args.string("page"), id: args.string("id"), payload: payload, frame: frame, z: try args.double("z")),
             to: &doc)
+        try applyCornerRadiusFlag(args: args, doc: &doc, layerId: r.newLayerId, aliases: ["radius"])
+        try applyShadowFlag(args: args, doc: &doc, layerId: r.newLayerId)
         try saveDoc(doc, to: url)
         ok(r.newLayerId ?? r.message)
     }
@@ -448,20 +511,65 @@ enum CLI {
         let args = Args(argv)
         var (doc, url) = try loadDoc(args)
         let fill = Parse.color(args: args, key: "fill", default: .white)
-        var stroke: Stroke? = nil
-        if let s = args.string("stroke") {
-            let parts = s.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }
-            guard parts.count == 2, let c = try? Color(hex: parts[0]), let w = Double(parts[1]) else {
-                throw EditorError.usage("--stroke expects 'color,width'")
-            }
-            stroke = Stroke(color: c, width: w)
-        }
+        let stroke = try Parse.stroke(args: args)
         let canvas = canvasForFrame(args, doc: doc)
         let frame = try Parse.frame(args: args, canvas: canvas, defaultSize: (200, 200))
-        let payload = ShapeLayerPayload(fill: fill, stroke: stroke, cornerRadius: 0)
+        let payload = ShapeLayerPayload(fill: fill, stroke: stroke)
         let r = try CommandEngine.apply(
             .addEllipse(pageId: args.string("page"), id: args.string("id"), payload: payload, frame: frame, z: try args.double("z")),
             to: &doc)
+        try applyShadowFlag(args: args, doc: &doc, layerId: r.newLayerId)
+        try saveDoc(doc, to: url)
+        ok(r.newLayerId ?? r.message)
+    }
+
+    private static func cmdAddGradient(_ argv: [String]) throws {
+        let args = Args(argv)
+        var (doc, url) = try loadDoc(args)
+        let payload = try Parse.gradientPayload(args: args)
+        let canvas = canvasForFrame(args, doc: doc)
+        let defaultSize = (Double(canvas.width), Double(canvas.height))
+        let frame = try Parse.frame(args: args, canvas: canvas, defaultSize: defaultSize)
+        let r = try CommandEngine.apply(
+            .addGradient(pageId: args.string("page"), id: args.string("id"),
+                         payload: payload, frame: frame, z: try args.double("z")),
+            to: &doc)
+        try applyCornerRadiusFlag(args: args, doc: &doc, layerId: r.newLayerId)
+        try applyShadowFlag(args: args, doc: &doc, layerId: r.newLayerId)
+        try saveDoc(doc, to: url)
+        ok(r.newLayerId ?? r.message)
+    }
+
+    private static func cmdAddBlur(_ argv: [String]) throws {
+        let args = Args(argv)
+        var (doc, url) = try loadDoc(args)
+        let radius = (try args.double("radius")) ?? 24
+        let tint = try Parse.optionalColor(args: args, key: "tint")
+        // Optional dynamic blur keypoints — `--stops "radius@pos,radius@pos,…"`. When provided,
+        // the layer becomes a gradient blur driven by these stops.
+        let stops = try Parse.blurStops(args: args)
+        let typeStr = args.string("type")?.lowercased()
+        let gradientType: GradientType
+        if let t = typeStr {
+            guard let g = GradientType(rawValue: t) else {
+                throw EditorError.usage("--type expects linear or radial")
+            }
+            gradientType = g
+        } else {
+            gradientType = .linear
+        }
+        let (sx, sy) = try Parse.normalizedPoint(args: args, key: "start") ?? (0, 0)
+        let (ex, ey) = try Parse.normalizedPoint(args: args, key: "end")   ?? (0, 1)
+        let payload = BlurLayerPayload(radius: radius, tint: tint,
+                                       stops: stops, gradientType: gradientType,
+                                       startX: sx, startY: sy, endX: ex, endY: ey)
+        let canvas = canvasForFrame(args, doc: doc)
+        let frame = try Parse.frame(args: args, canvas: canvas, defaultSize: (400, 400))
+        let r = try CommandEngine.apply(
+            .addBlur(pageId: args.string("page"), id: args.string("id"),
+                     payload: payload, frame: frame, z: try args.double("z")),
+            to: &doc)
+        try applyCornerRadiusFlag(args: args, doc: &doc, layerId: r.newLayerId)
         try saveDoc(doc, to: url)
         ok(r.newLayerId ?? r.message)
     }
@@ -498,8 +606,244 @@ enum CLI {
         let r = try CommandEngine.apply(
             .addDeviceBezel(pageId: args.string("page"), id: args.string("id"), payload: payload, frame: frame, z: try args.double("z")),
             to: &doc)
+        try applyShadowFlag(args: args, doc: &doc, layerId: r.newLayerId)
+        // cornerRadius is intentionally not threaded on device bezels — they define their own shape.
         try saveDoc(doc, to: url)
         ok(r.newLayerId ?? r.message)
+    }
+
+    // MARK: - new shapes
+
+    private static func cmdAddLine(_ argv: [String]) throws {
+        let args = Args(argv)
+        var (doc, url) = try loadDoc(args)
+        let color = Parse.color(args: args, key: "color", default: .white)
+        let width = (try args.double("width")) ?? 6
+        let (sx, sy) = try Parse.normalizedPoint(args: args, key: "start") ?? (0, 0.5)
+        let (ex, ey) = try Parse.normalizedPoint(args: args, key: "end") ?? (1, 0.5)
+        let arrowsRaw = args.string("arrow")?.lowercased() ?? "none"
+        let startArrow = (arrowsRaw == "start" || arrowsRaw == "both")
+        let endArrow = (arrowsRaw == "end" || arrowsRaw == "both")
+        let arrowSize = (try args.double("arrow-size")) ?? 4
+        let payload = LineLayerPayload(color: color, width: width,
+                                       startX: sx, startY: sy, endX: ex, endY: ey,
+                                       startArrow: startArrow, endArrow: endArrow,
+                                       arrowSize: arrowSize)
+        let canvas = canvasForFrame(args, doc: doc)
+        let frame = try Parse.frame(args: args, canvas: canvas, defaultSize: (Double(canvas.width) * 0.6, max(width, 8)))
+        let r = try CommandEngine.apply(
+            .addLine(pageId: args.string("page"), id: args.string("id"),
+                     payload: payload, frame: frame, z: try args.double("z")),
+            to: &doc)
+        try applyCornerRadiusFlag(args: args, doc: &doc, layerId: r.newLayerId)
+        try applyShadowFlag(args: args, doc: &doc, layerId: r.newLayerId)
+        try saveDoc(doc, to: url)
+        ok(r.newLayerId ?? r.message)
+    }
+
+    private static func cmdAddPolygon(_ argv: [String]) throws {
+        let args = Args(argv)
+        var (doc, url) = try loadDoc(args)
+        let sides = (try args.int("sides")) ?? 6
+        let fill = Parse.color(args: args, key: "fill", default: .white)
+        let stroke = try Parse.stroke(args: args)
+        let payload = PolygonLayerPayload(sides: sides, fill: fill, stroke: stroke)
+        let canvas = canvasForFrame(args, doc: doc)
+        let frame = try Parse.frame(args: args, canvas: canvas, defaultSize: (300, 300))
+        let r = try CommandEngine.apply(
+            .addPolygon(pageId: args.string("page"), id: args.string("id"),
+                        payload: payload, frame: frame, z: try args.double("z")),
+            to: &doc)
+        try applyCornerRadiusFlag(args: args, doc: &doc, layerId: r.newLayerId)
+        try applyShadowFlag(args: args, doc: &doc, layerId: r.newLayerId)
+        try saveDoc(doc, to: url)
+        ok(r.newLayerId ?? r.message)
+    }
+
+    private static func cmdAddStar(_ argv: [String]) throws {
+        let args = Args(argv)
+        var (doc, url) = try loadDoc(args)
+        let points = (try args.int("points")) ?? 5
+        let inner = (try args.double("inner-radius")) ?? 0.4
+        let fill = Parse.color(args: args, key: "fill", default: .white)
+        let stroke = try Parse.stroke(args: args)
+        let payload = StarLayerPayload(points: points, innerRadius: inner, fill: fill, stroke: stroke)
+        let canvas = canvasForFrame(args, doc: doc)
+        let frame = try Parse.frame(args: args, canvas: canvas, defaultSize: (300, 300))
+        let r = try CommandEngine.apply(
+            .addStar(pageId: args.string("page"), id: args.string("id"),
+                     payload: payload, frame: frame, z: try args.double("z")),
+            to: &doc)
+        try applyCornerRadiusFlag(args: args, doc: &doc, layerId: r.newLayerId)
+        try applyShadowFlag(args: args, doc: &doc, layerId: r.newLayerId)
+        try saveDoc(doc, to: url)
+        ok(r.newLayerId ?? r.message)
+    }
+
+    private static func cmdSetLayerGradient(_ argv: [String]) throws {
+        let args = Args(argv)
+        var (doc, url) = try loadDoc(args)
+        let id = try args.required("id")
+        let gradient: GradientLayerPayload?
+        if args.has("clear") {
+            gradient = nil
+        } else {
+            gradient = try Parse.gradientPayload(args: args)
+        }
+        _ = try CommandEngine.apply(.setLayerGradient(pageId: args.string("page"), id: id, gradient: gradient), to: &doc)
+        try saveDoc(doc, to: url)
+        ok("gradient \(id) → \(gradient == nil ? "(cleared)" : "set")")
+    }
+
+    private static func cmdGroup(_ argv: [String]) throws {
+        let args = Args(argv)
+        var (doc, url) = try loadDoc(args)
+        let raw = try args.required("ids")
+        let ids = raw.split(separator: ",")
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .filter { !$0.isEmpty }
+        guard !ids.isEmpty else { throw EditorError.usage("--ids must list at least one layer id") }
+        let r = try CommandEngine.apply(
+            .addGroup(pageId: args.string("page"), id: args.string("id"),
+                      name: args.string("name"), childIds: ids),
+            to: &doc)
+        try saveDoc(doc, to: url)
+        ok(r.newLayerId ?? r.message)
+    }
+
+    /// `move-layer --id <layerId> [--into <groupId>] [--before <siblingId>]`
+    /// Use `--into` with no value (or omit it) to promote the layer back to the page's top level.
+    private static func cmdMoveLayer(_ argv: [String]) throws {
+        let args = Args(argv)
+        var (doc, url) = try loadDoc(args)
+        let id = try args.required("id")
+        let intoGroupId = args.string("into")
+        let beforeLayerId = args.string("before")
+        let r = try CommandEngine.apply(
+            .moveLayer(pageId: args.string("page"), layerId: id,
+                       intoGroupId: intoGroupId, beforeLayerId: beforeLayerId),
+            to: &doc)
+        try saveDoc(doc, to: url)
+        ok(r.message)
+    }
+
+    private static func cmdUngroup(_ argv: [String]) throws {
+        let args = Args(argv)
+        var (doc, url) = try loadDoc(args)
+        let id = try args.required("id")
+        let r = try CommandEngine.apply(.ungroup(pageId: args.string("page"), id: id), to: &doc)
+        try saveDoc(doc, to: url)
+        ok(r.message)
+    }
+
+    /// `set-group-clip --id <groupId> [--value true|false]` — crop the group's children to its
+    /// bounds. Value defaults to true. Combine with `set-corner-radius` for a rounded crop.
+    private static func cmdSetGroupClip(_ argv: [String]) throws {
+        let args = Args(argv)
+        var (doc, url) = try loadDoc(args)
+        let id = try args.required("id")
+        let v = (try args.boolValue("value")) ?? true
+        _ = try CommandEngine.apply(.setGroupClipsToBounds(pageId: args.string("page"), id: id, value: v), to: &doc)
+        try saveDoc(doc, to: url)
+        ok("clipToBounds \(id) → \(v)")
+    }
+
+    private static func cmdSetCornerRadius(_ argv: [String]) throws {
+        let args = Args(argv)
+        var (doc, url) = try loadDoc(args)
+        let id = try args.required("id")
+        let value = try (args.double("value") ?? args.double("corner-radius")) ?? 0
+        _ = try CommandEngine.apply(.setCornerRadius(pageId: args.string("page"), id: id, value: value), to: &doc)
+        try saveDoc(doc, to: url)
+        ok("cornerRadius \(id) → \(value)")
+    }
+
+    private static func cmdSetCornerStyle(_ argv: [String]) throws {
+        let args = Args(argv)
+        var (doc, url) = try loadDoc(args)
+        let id = try args.required("id")
+        let raw = try args.required("style").lowercased()
+        guard let style = CornerStyle(rawValue: raw) else {
+            throw EditorError.usage("--style expects arc | continuous | cut")
+        }
+        _ = try CommandEngine.apply(.setCornerStyle(pageId: args.string("page"), id: id, style: style), to: &doc)
+        try saveDoc(doc, to: url)
+        ok("cornerStyle \(id) → \(style.rawValue)")
+    }
+
+    /// `set-corners --id <id> --corners <spec>` where spec is `all`, `none`, or a comma/space list
+    /// of corners: `topLeft`/`tl`, `topRight`/`tr`, `bottomLeft`/`bl`, `bottomRight`/`br`, or the
+    /// edge shortcuts `top`, `bottom`, `left`, `right`.
+    private static func cmdSetCorners(_ argv: [String]) throws {
+        let args = Args(argv)
+        var (doc, url) = try loadDoc(args)
+        let id = try args.required("id")
+        let corners = parseCorners(try args.required("corners"))
+        _ = try CommandEngine.apply(.setRoundedCorners(pageId: args.string("page"), id: id, corners: corners), to: &doc)
+        try saveDoc(doc, to: url)
+        let label = corners == .all ? "all" : (corners.isEmpty ? "none" : corners.names.joined(separator: ","))
+        ok("roundedCorners \(id) → \(label)")
+    }
+
+    private static func parseCorners(_ raw: String) -> RectCorners {
+        let lower = raw.lowercased().trimmingCharacters(in: .whitespaces)
+        if lower == "all" { return .all }
+        if lower == "none" || lower.isEmpty { return [] }
+        var result: RectCorners = []
+        for tok in lower.split(whereSeparator: { ",|+ ".contains($0) }) {
+            switch tok {
+            case "tl", "topleft", "top-left":         result.insert(.topLeft)
+            case "tr", "topright", "top-right":       result.insert(.topRight)
+            case "bl", "bottomleft", "bottom-left":   result.insert(.bottomLeft)
+            case "br", "bottomright", "bottom-right": result.insert(.bottomRight)
+            case "top":    result.formUnion([.topLeft, .topRight])
+            case "bottom": result.formUnion([.bottomLeft, .bottomRight])
+            case "left":   result.formUnion([.topLeft, .bottomLeft])
+            case "right":  result.formUnion([.topRight, .bottomRight])
+            default: break
+            }
+        }
+        return result
+    }
+
+    /// `set-layer-bg --id <id> (--color "#hex" | gradient flags | --clear)`
+    /// Gradient flags reuse the same set accepted by `add-gradient` (`--stops`, `--type`,
+    /// `--start`, `--end`).
+    private static func cmdSetLayerBackground(_ argv: [String]) throws {
+        let args = Args(argv)
+        var (doc, url) = try loadDoc(args)
+        let id = try args.required("id")
+        let background: LayerBackground?
+        if args.has("clear") {
+            background = nil
+        } else if let hex = args.string("color") {
+            background = .color(try Color(hex: hex))
+        } else if args.string("stops") != nil || args.string("start") != nil
+                  || args.string("end") != nil || args.string("type") != nil {
+            background = .gradient(try Parse.gradientPayload(args: args))
+        } else {
+            throw EditorError.usage("provide --color \"#hex\", gradient flags, or --clear")
+        }
+        _ = try CommandEngine.apply(.setLayerBackground(pageId: args.string("page"), id: id, background: background), to: &doc)
+        try saveDoc(doc, to: url)
+        ok("background \(id) → \(background == nil ? "(cleared)" : "set")")
+    }
+
+    private static func cmdSetShadow(_ argv: [String]) throws {
+        let args = Args(argv)
+        var (doc, url) = try loadDoc(args)
+        let id = try args.required("id")
+        let shadow: Shadow?
+        if args.has("clear") {
+            shadow = nil
+        } else if let s = Parse.shadow(args: args) {
+            shadow = s
+        } else {
+            throw EditorError.usage("--shadow \"color,dx,dy,blur\" or --clear")
+        }
+        _ = try CommandEngine.apply(.setShadow(pageId: args.string("page"), id: id, shadow: shadow), to: &doc)
+        try saveDoc(doc, to: url)
+        ok("shadow \(id) → \(shadow == nil ? "(cleared)" : "set")")
     }
 
     // MARK: - edits
@@ -792,6 +1136,37 @@ enum CLI {
                        [--screenshot-asset <id>|--screenshot-path <file>]
                        [--frame ...|--at <pos> --height N]
                        [--chrome-color "#RRGGBB"] [--z N] [--id <id>]
+          add-gradient --project <p> (--frame ...|--at ... [--size ...])
+                       [--type linear|radial] [--stops "#000@0,#FFF@1"]
+                       [--start "x,y"] [--end "x,y"] (normalized 0..1)
+                       [--corner-radius N] [--z N] [--id <id>]
+          add-blur     --project <p> (--frame ...|--at ... [--size ...])
+                       [--radius N] [--corner-radius N] [--tint "#RRGGBBAA"]
+                       [--z N] [--id <id>]
+          add-line     --project <p> (--frame ...|--at ... [--size ...])
+                       [--color "#RRGGBB"] [--width N]
+                       [--start "x,y"] [--end "x,y"] (normalized 0..1)
+                       [--arrow none|start|end|both] [--arrow-size N]
+                       [--z N] [--id <id>]
+          add-polygon  --project <p> --sides N (--frame ...|--at ... [--size ...])
+                       [--fill "#RRGGBB"] [--stroke "color,width"]
+                       [--z N] [--id <id>]
+          add-star     --project <p> [--points N] [--inner-radius 0..1]
+                       (--frame ...|--at ... [--size ...])
+                       [--fill "#RRGGBB"] [--stroke "color,width"]
+                       [--z N] [--id <id>]
+
+        SHADOW
+          set-shadow   --project <p> --id <layerId>
+                       (--shadow "color,dx,dy,blur" | --clear)
+          Every add-* command also accepts --shadow to attach a drop shadow on creation.
+
+        CORNERS  (--project <p> --id <layerId>, optional --page)
+          set-corner-radius  --value N            rounded-corner radius in px (0 = off)
+          set-corner-style   --style arc|continuous|cut
+          set-corners        --corners <spec>     which corners round; spec is all | none |
+                             a list of topLeft/topRight/bottomLeft/bottomRight (or tl,tr,bl,br)
+                             or edges top|bottom|left|right, e.g. --corners "top" or "tl,tr"
 
         EDITING LAYERS  (every command takes --project <p> --id <layerId>, optional --page)
           move           --to "x,y" | --at <pos> | --dx N --dy N
@@ -810,6 +1185,13 @@ enum CLI {
           set-alignment  --align left|center|right|justified
           set-bezel-color      --color "<Label>"
           set-bezel-screenshot (--asset <id> | --asset-path <file> | --clear)
+
+        GROUPS
+          group          --ids "a,b,c" [--id <gid>] [--name "..."]
+          ungroup        --id <gid>
+          move-layer     --id <layerId> [--into <gid>] [--before <siblingId>]
+          set-group-clip --id <gid> [--value true|false]   crop children to the group bounds
+                         (alias: crop-to-bounds; combine with set-corner-radius for rounded crop)
 
         Z-ORDER
           z|set-z              --id <id> --value N

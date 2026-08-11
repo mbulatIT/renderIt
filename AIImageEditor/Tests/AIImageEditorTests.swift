@@ -1,6 +1,8 @@
 import Foundation
+import AppKit
 import XCTest
 import AIImageEditorCore
+@testable import AIImageEditor
 
 final class AIImageEditorTests: XCTestCase {
 
@@ -245,5 +247,166 @@ final class AIImageEditorTests: XCTestCase {
         let p2 = try r.renderPreviewPNG(doc, previewId: id2)
         XCTAssertGreaterThan(p1.count, 100)
         XCTAssertGreaterThan(p2.count, 100)
+    }
+
+    // MARK: - Group crop-to-bounds
+
+    func test_group_clipsToBounds_commandAndCodec() throws {
+        var doc = Document(canvas: Canvas(width: 300, height: 300))
+        _ = try CommandEngine.apply(.addRect(pageId: nil, id: "a", payload: .init(), frame: Frame(0, 0, 50, 50), z: nil), to: &doc)
+        _ = try CommandEngine.apply(.addRect(pageId: nil, id: "b", payload: .init(), frame: Frame(100, 100, 50, 50), z: nil), to: &doc)
+        _ = try CommandEngine.apply(.addGroup(pageId: nil, id: "g", name: nil, childIds: ["a", "b"]), to: &doc)
+
+        // Off by default.
+        guard case .group(let g0)? = doc.layers.first(where: { $0.id == "g" })?.payload else {
+            return XCTFail("group not created")
+        }
+        XCTAssertFalse(g0.clipsToBounds)
+
+        // Enabling the flag leaves the auto-recomputed frame as the union of the children.
+        _ = try CommandEngine.apply(.setGroupClipsToBounds(pageId: nil, id: "g", value: true), to: &doc)
+        let group = try XCTUnwrap(doc.layers.first(where: { $0.id == "g" }))
+        guard case .group(let g1) = group.payload else { return XCTFail("not a group") }
+        XCTAssertTrue(g1.clipsToBounds)
+        XCTAssertEqual(group.frame.x, 0);   XCTAssertEqual(group.frame.y, 0)
+        XCTAssertEqual(group.frame.w, 150); XCTAssertEqual(group.frame.h, 150)
+
+        // Survives a codec round-trip.
+        let round = try DocumentCodec.decode(try DocumentCodec.encode(doc))
+        guard case .group(let g2)? = round.layers.first(where: { $0.id == "g" })?.payload else {
+            return XCTFail("group missing after decode")
+        }
+        XCTAssertTrue(g2.clipsToBounds)
+
+        // Toggling off (the default) decodes back to false.
+        _ = try CommandEngine.apply(.setGroupClipsToBounds(pageId: nil, id: "g", value: false), to: &doc)
+        let round2 = try DocumentCodec.decode(try DocumentCodec.encode(doc))
+        guard case .group(let g3)? = round2.layers.first(where: { $0.id == "g" })?.payload else {
+            return XCTFail("group missing after decode")
+        }
+        XCTAssertFalse(g3.clipsToBounds)
+    }
+
+    func test_group_clipsToBounds_cropsOverflow() throws {
+        // A 45°-rotated red square whose drawn corners poke outside the group's frame (the
+        // axis-aligned union of children's frames). Cropping to bounds should trim those corners,
+        // so the clipped render has strictly fewer solid-red pixels than the unclipped one.
+        func makeDoc(clip: Bool) throws -> Document {
+            var doc = Document(canvas: Canvas(width: 200, height: 200, background: .white))
+            _ = try CommandEngine.apply(
+                .addRect(pageId: nil, id: "r",
+                         payload: .init(fill: try Color(hex: "#FF0000")),
+                         frame: Frame(50, 50, 100, 100), z: nil), to: &doc)
+            _ = try CommandEngine.apply(.rotate(pageId: nil, id: "r", degrees: 45), to: &doc)
+            _ = try CommandEngine.apply(.addGroup(pageId: nil, id: "g", name: nil, childIds: ["r"]), to: &doc)
+            if clip {
+                _ = try CommandEngine.apply(.setGroupClipsToBounds(pageId: nil, id: "g", value: true), to: &doc)
+            }
+            return doc
+        }
+        let redOff = try redPixelCount(Renderer().renderPNG(makeDoc(clip: false), scale: 1))
+        let redOn  = try redPixelCount(Renderer().renderPNG(makeDoc(clip: true),  scale: 1))
+        XCTAssertGreaterThan(redOn, 0, "the clipped group should still render the square inside its bounds")
+        XCTAssertLessThan(redOn, redOff, "crop-to-bounds should remove the rotated corners that overflow the group frame")
+    }
+
+    // MARK: - Fractional render scale (editor display-resolution rendering)
+
+    func test_renderer_fractionalPixelScale_dimensionsAndParity() throws {
+        var doc = Document(canvas: Canvas(width: 200, height: 300, background: try Color(hex: "#3344FF")))
+        _ = try CommandEngine.apply(
+            .addRect(pageId: nil, id: "r", payload: .init(fill: try Color(hex: "#FFFFFF")),
+                     frame: Frame(20, 20, 100, 100), z: nil), to: &doc)
+        let canvas = doc.activePage.canvas
+        let r = Renderer()
+
+        // pixelScale 0.5 → half the pixels in each dimension.
+        let half = try r.renderCGImage(doc, pixelScale: 0.5)
+        XCTAssertEqual(half.width, Int((Double(canvas.width) * 0.5).rounded()))
+        XCTAssertEqual(half.height, Int((Double(canvas.height) * 0.5).rounded()))
+
+        // pixelScale 0.25 → quarter resolution, far fewer pixels (the editor's zoomed-out case).
+        let quarter = try r.renderCGImage(doc, pixelScale: 0.25)
+        XCTAssertEqual(quarter.width, Int((Double(canvas.width) * 0.25).rounded()))
+        XCTAssertLessThan(quarter.width * quarter.height, half.width * half.height)
+
+        // pixelScale 1.0 must match the integer scale:1 path exactly (export/CLI parity).
+        let frac1 = try r.renderCGImage(doc, pixelScale: 1.0)
+        let int1 = try r.renderCGImage(doc, scale: 1)
+        XCTAssertEqual(frac1.width, int1.width)
+        XCTAssertEqual(frac1.height, int1.height)
+        XCTAssertEqual(frac1.width, canvas.width)
+        XCTAssertEqual(frac1.height, canvas.height)
+    }
+
+    func test_canvasRenderer_renderScaleBuckets() {
+        // Zoomed out → quantized-up crisp scale, capped at 1.0; idle scale is never below zoom.
+        XCTAssertEqual(CanvasRenderer.renderScale(zoom: 0.25, interacting: false), 0.25, accuracy: 0.0001)
+        XCTAssertEqual(CanvasRenderer.renderScale(zoom: 0.30, interacting: false), 0.50, accuracy: 0.0001)
+        XCTAssertEqual(CanvasRenderer.renderScale(zoom: 1.50, interacting: false), 1.00, accuracy: 0.0001)
+        XCTAssertEqual(CanvasRenderer.renderScale(zoom: 0.05, interacting: false), 0.25, accuracy: 0.0001)
+        // During an interaction the draft scale is coarser than the crisp scale.
+        XCTAssertLessThan(CanvasRenderer.renderScale(zoom: 0.25, interacting: true),
+                          CanvasRenderer.renderScale(zoom: 0.25, interacting: false))
+    }
+
+    // MARK: - Per-corner rounding (roundedCorners)
+
+    func test_roundedCorners_commandAndCodec() throws {
+        var doc = Document(canvas: Canvas(width: 100, height: 100))
+        _ = try CommandEngine.apply(.addRect(pageId: nil, id: "r", payload: .init(),
+                                             frame: Frame(0, 0, 50, 50), z: nil), to: &doc)
+        func corners(_ d: Document) -> RectCorners? { d.layers.first { $0.id == "r" }?.roundedCorners }
+
+        // Default = all, and omitted from JSON for backward compatibility.
+        XCTAssertEqual(corners(doc), .all)
+        let json0 = try DocumentCodec.encode(doc)
+        XCTAssertFalse(String(data: json0, encoding: .utf8)!.contains("roundedCorners"))
+        XCTAssertEqual(corners(try DocumentCodec.decode(json0)), .all)
+
+        // A subset round-trips through the codec.
+        _ = try CommandEngine.apply(.setRoundedCorners(pageId: nil, id: "r",
+                                                       corners: [.topLeft, .topRight]), to: &doc)
+        XCTAssertEqual(corners(doc), [.topLeft, .topRight])
+        XCTAssertEqual(corners(try DocumentCodec.decode(try DocumentCodec.encode(doc))), [.topLeft, .topRight])
+
+        // Empty (every corner square) is preserved, not mistaken for the default-all.
+        _ = try CommandEngine.apply(.setRoundedCorners(pageId: nil, id: "r", corners: []), to: &doc)
+        XCTAssertEqual(corners(try DocumentCodec.decode(try DocumentCodec.encode(doc))), [])
+    }
+
+    func test_roundedCorners_perCornerRendering() throws {
+        // A red square filling a white canvas, radius 80. Rounding a corner carves red away there;
+        // squaring it keeps the red. So more squared corners ⇒ more red pixels survive.
+        func redCount(_ corners: RectCorners) throws -> Int {
+            var doc = Document(canvas: Canvas(width: 200, height: 200, background: .white))
+            _ = try CommandEngine.apply(.addRect(pageId: nil, id: "r",
+                payload: .init(fill: try Color(hex: "#FF0000")),
+                frame: Frame(0, 0, 200, 200), z: nil), to: &doc)
+            _ = try CommandEngine.apply(.setCornerRadius(pageId: nil, id: "r", value: 80), to: &doc)
+            _ = try CommandEngine.apply(.setCornerStyle(pageId: nil, id: "r", style: .arc), to: &doc)
+            _ = try CommandEngine.apply(.setRoundedCorners(pageId: nil, id: "r", corners: corners), to: &doc)
+            return redPixelCount(try Renderer().renderPNG(doc, scale: 1))
+        }
+        let noneRounded = try redCount([])         // full square — most red
+        let oneRounded  = try redCount([.topLeft]) // 3 square corners
+        let allRounded  = try redCount(.all)       // 0 square corners — least red
+        XCTAssertGreaterThan(noneRounded, oneRounded)
+        XCTAssertGreaterThan(oneRounded, allRounded)
+    }
+
+    /// Count solid-red pixels in a PNG — used to measure how much of a red square survives a crop.
+    private func redPixelCount(_ png: Data) -> Int {
+        guard let rep = NSBitmapImageRep(data: png) else { return -1 }
+        var count = 0
+        for y in 0..<rep.pixelsHigh {
+            for x in 0..<rep.pixelsWide {
+                guard let c = rep.colorAt(x: x, y: y)?.usingColorSpace(.sRGB) else { continue }
+                if c.redComponent > 0.75, c.greenComponent < 0.25, c.blueComponent < 0.25 {
+                    count += 1
+                }
+            }
+        }
+        return count
     }
 }

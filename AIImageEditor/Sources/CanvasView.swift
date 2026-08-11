@@ -10,13 +10,13 @@ struct CanvasView: View {
 
     @State private var interaction: Interaction = .idle
     @State private var dropHighlight: String?
-    /// Held in `@State` purely so the same instance survives view-body recomputations during a
-    /// drag. Mutations don't trigger view updates (it's a plain class), which is exactly the
-    /// behaviour we want for a render-side cache.
-    @State private var renderCache = PageRenderCache()
-    /// Zoom level at the start of a magnification gesture — multiplied by the gesture's
-    /// magnification value to update `zoom`.
-    @State private var zoomAtGestureStart: CGFloat?
+    /// Bridge to the live NSScrollView for converting pointer locations to canvas pixels through
+    /// the actual magnification + scroll. `@State` so the same instance survives body recomputes.
+    @State private var geometry = CanvasGeometry()
+    /// Off-main, coalesced canvas renderer. Body shows its last completed image; renders happen
+    /// on a background queue at the on-screen zoom resolution (a coarse draft during an active
+    /// move/resize, crisp on release), so editing never blocks the main thread on rasterization.
+    @StateObject private var canvasRenderer = CanvasRenderer()
 
     // Constant origin inset used for the dragGesture/dropDelegate coordinate math.
     private let canvasInset: CGFloat = 40
@@ -25,39 +25,39 @@ struct CanvasView: View {
     private let handleScreenSize: CGFloat = 14
 
     var body: some View {
-        GeometryReader { proxy in
-            let page = document.selectedPage
-            let canvasSize = CGSize(width: CGFloat(page.canvas.width) * zoom,
-                                    height: CGFloat(page.canvas.height) * zoom)
-            ZStack {
-                Color(white: 0.13).ignoresSafeArea()
-                ScrollView([.horizontal, .vertical]) {
-                    ZStack(alignment: .topLeading) {
-                        CheckerboardView()
-                            .frame(width: canvasSize.width, height: canvasSize.height)
-                        renderedImage(size: canvasSize)
-                        selectionOverlay(canvasSize: canvasSize)
-                    }
+        let page = document.selectedPage
+        // Canvas content lives at canvas-pixel size inside the scroll view. NSScrollView's
+        // native magnification handles the visual zoom — and crucially anchors the zoom on the
+        // cursor / pinch center for free.
+        let canvasSize = CGSize(width: CGFloat(page.canvas.width),
+                                height: CGFloat(page.canvas.height))
+        let outerSize = CGSize(width: canvasSize.width + canvasInset * 2,
+                               height: canvasSize.height + canvasInset * 2)
+        ZoomScrollView(contentSize: outerSize, zoom: $zoom, geometry: geometry) {
+            ZStack(alignment: .topLeading) {
+                CheckerboardView()
                     .frame(width: canvasSize.width, height: canvasSize.height)
-                    .padding(canvasInset)
-                    .contentShape(Rectangle())
-                    .gesture(canvasGesture())
-                    .simultaneousGesture(zoomGesture())
-                    .onDrop(of: [.fileURL, .image], delegate: ImageDropDelegate(
-                        document: document,
-                        zoom: zoom,
-                        canvasOriginInset: canvasInset,
-                        highlightedLayerId: $dropHighlight))
-                }
-                .frame(width: proxy.size.width, height: proxy.size.height)
+                renderedImage(size: canvasSize)
+                groupOutlines()
+                selectionOverlay(canvasSize: canvasSize)
             }
+            .frame(width: canvasSize.width, height: canvasSize.height)
+            .padding(canvasInset)
+            .contentShape(Rectangle())
+            .gesture(canvasGesture())
+            .onDrop(of: [.fileURL, .image], delegate: ImageDropDelegate(
+                document: document,
+                canvasOriginInset: canvasInset,
+                highlightedLayerId: $dropHighlight))
+            .onAppear { requestRender() }
+            .onChange(of: renderKey) { _ in requestRender() }
         }
         .background(Color(white: 0.1))
     }
 
     @ViewBuilder
     private func renderedImage(size: CGSize) -> some View {
-        if let image = renderImage() {
+        if let image = canvasRenderer.image {
             Image(nsImage: image)
                 .resizable()
                 .interpolation(.high)
@@ -67,46 +67,128 @@ struct CanvasView: View {
         }
     }
 
-    private func renderImage() -> NSImage? {
-        renderCache.render(document: document.document,
-                           pageId: document.selectedPageId,
-                           baseDirectory: baseDirectory)
+    /// True while the user is actively dragging or resizing — drives the coarse "draft" render
+    /// scale. Marquee/selection don't change canvas pixels, so they stay at the crisp scale.
+    private var isManipulating: Bool {
+        switch interaction {
+        case .moving, .resizing: return true
+        default:                 return false
+        }
+    }
+
+    /// Cheap value that changes exactly when the canvas pixels must be re-rendered: the page,
+    /// the document revision, or the render scale bucket (zoom / draft-vs-crisp). Drives the
+    /// `.onChange` that schedules a render.
+    private var renderKey: CanvasRenderer.Key {
+        let scale = CanvasRenderer.renderScale(zoom: zoom, interacting: isManipulating)
+        return CanvasRenderer.Key(pageId: document.selectedPageId,
+                                  revision: document.revision,
+                                  scaleMilli: Int((scale * 1000).rounded()),
+                                  baseDir: baseDirectory)
+    }
+
+    private func requestRender() {
+        let page = document.selectedPage
+        canvasRenderer.request(document: document.document,
+                               pageId: document.selectedPageId,
+                               canvasSize: CGSize(width: page.canvas.width, height: page.canvas.height),
+                               revision: document.revision,
+                               zoom: zoom,
+                               interacting: isManipulating,
+                               baseDirectory: baseDirectory)
+    }
+
+    // MARK: - Group outlines
+
+    /// Persistent dashed rectangle around every group layer in the page, so users can see the
+    /// group bounds even when the group isn't selected. Drawn behind the selection overlay so
+    /// the selected group's solid outline takes precedence. Coordinates are canvas pixels —
+    /// NSScrollView's magnification scales the whole hosted view, so the stroke width is also
+    /// scaled with zoom; we compensate by dividing the line width by zoom.
+    @ViewBuilder
+    private func groupOutlines() -> some View {
+        ForEach(document.selectedPage.renderOrder, id: \.id) { layer in
+            if case .group = layer.payload {
+                let f = layer.frame
+                Rectangle()
+                    .strokeBorder(Color.accentColor.opacity(0.55),
+                                  style: StrokeStyle(lineWidth: 1 / zoom, dash: [4 / zoom, 3 / zoom]))
+                    .frame(width: CGFloat(f.w), height: CGFloat(f.h))
+                    .offset(x: CGFloat(f.x), y: CGFloat(f.y))
+                    .allowsHitTesting(false)
+            }
+        }
     }
 
     // MARK: - Selection overlay (frame outline + handles)
 
     @ViewBuilder
     private func selectionOverlay(canvasSize: CGSize) -> some View {
-        if let sel = document.selectedLayerId,
-           let layer = document.selectedPage.layer(id: sel) {
+        // Coordinates here are in canvas pixels; NSScrollView magnification scales them on
+        // screen, so we divide stroke widths and handle sizes by zoom to keep them
+        // visually constant regardless of magnification.
+        ForEach(Array(document.selectedLayerIds), id: \.self) { sel in
+            if let layer = findLayer(id: sel) {
+                let f = layer.frame
+                Rectangle()
+                    .stroke(Color.accentColor, lineWidth: 1.5 / zoom)
+                    .frame(width: CGFloat(f.w), height: CGFloat(f.h))
+                    .offset(x: CGFloat(f.x), y: CGFloat(f.y))
+                    .allowsHitTesting(false)
+            }
+        }
+        // Resize handles only make sense with exactly one layer selected.
+        if document.selectedLayerIds.count == 1,
+           let sel = document.selectedLayerIds.first,
+           let layer = findLayer(id: sel) {
             let f = layer.frame
-            let x = CGFloat(f.x) * zoom
-            let y = CGFloat(f.y) * zoom
-            let w = CGFloat(f.w) * zoom
-            let h = CGFloat(f.h) * zoom
-            // Frame outline
-            Rectangle()
-                .stroke(Color.accentColor, lineWidth: 1.5)
-                .frame(width: w, height: h)
-                .offset(x: x, y: y)
-                .allowsHitTesting(false)
-
-            // Resize handles
             ForEach(Handle.allCases) { handle in
-                HandleView(handle: handle, isActive: handle == activeHandle)
-                    .position(handlePosition(handle: handle, x: x, y: y, w: w, h: h))
+                HandleView(handle: handle, isActive: handle == activeHandle, zoom: zoom)
+                    .position(handlePosition(handle: handle,
+                                             x: CGFloat(f.x), y: CGFloat(f.y),
+                                             w: CGFloat(f.w), h: CGFloat(f.h)))
                     .allowsHitTesting(false)
             }
         }
         if let hid = dropHighlight,
-           let layer = document.selectedPage.layer(id: hid) {
+           let layer = findLayer(id: hid) {
             let f = layer.frame
             Rectangle()
-                .stroke(Color.green, style: StrokeStyle(lineWidth: 3, dash: [6]))
-                .frame(width: CGFloat(f.w) * zoom, height: CGFloat(f.h) * zoom)
-                .offset(x: CGFloat(f.x) * zoom, y: CGFloat(f.y) * zoom)
+                .stroke(Color.green, style: StrokeStyle(lineWidth: 3 / zoom, dash: [6 / zoom]))
+                .frame(width: CGFloat(f.w), height: CGFloat(f.h))
+                .offset(x: CGFloat(f.x), y: CGFloat(f.y))
                 .allowsHitTesting(false)
         }
+        // Marquee selection rectangle (drawn while the user click-drags on empty canvas).
+        if case .marquee(let origin, let current, _, _) = interaction {
+            let rect = CGRect(x: min(origin.x, current.x),
+                              y: min(origin.y, current.y),
+                              width: abs(current.x - origin.x),
+                              height: abs(current.y - origin.y))
+            Rectangle()
+                .fill(Color.accentColor.opacity(0.12))
+                .frame(width: rect.width, height: rect.height)
+                .offset(x: rect.minX, y: rect.minY)
+                .allowsHitTesting(false)
+            Rectangle()
+                .stroke(Color.accentColor, style: StrokeStyle(lineWidth: 1 / zoom, dash: [3 / zoom]))
+                .frame(width: rect.width, height: rect.height)
+                .offset(x: rect.minX, y: rect.minY)
+                .allowsHitTesting(false)
+        }
+    }
+
+    /// Like `selectedPage.layer(id:)` but also peers inside groups so multi-select overlays
+    /// work when a nested child is in the selection set.
+    private func findLayer(id: String) -> Layer? {
+        func search(_ layers: [Layer]) -> Layer? {
+            for l in layers {
+                if l.id == id { return l }
+                if case .group(let g) = l.payload, let f = search(g.children) { return f }
+            }
+            return nil
+        }
+        return search(document.selectedPage.layers)
     }
 
     private var activeHandle: Handle? {
@@ -123,23 +205,11 @@ struct CanvasView: View {
     // MARK: - Gestures
 
     private func canvasGesture() -> some Gesture {
-        DragGesture(minimumDistance: 0)
+        // Report locations in the global (window) space; `toCanvas` maps them into canvas pixels
+        // using the measured canvas frame, so the mapping is correct at any magnification.
+        DragGesture(minimumDistance: 0, coordinateSpace: .global)
             .onChanged { value in handleDragChanged(value: value) }
             .onEnded   { _      in handleDragEnded() }
-    }
-
-    /// Trackpad pinch (two-finger spread/squeeze) zooms the canvas. Multiplies the zoom level
-    /// from the gesture-start baseline so a continuous pinch feels natural.
-    private func zoomGesture() -> some Gesture {
-        MagnificationGesture()
-            .onChanged { value in
-                if zoomAtGestureStart == nil { zoomAtGestureStart = zoom }
-                let base = zoomAtGestureStart ?? zoom
-                zoom = max(0.05, min(2.0, base * value))
-            }
-            .onEnded { _ in
-                zoomAtGestureStart = nil
-            }
     }
 
     private func handleDragChanged(value: DragGesture.Value) {
@@ -155,28 +225,52 @@ struct CanvasView: View {
         interaction = .idle
     }
 
-    /// Decide whether the gesture begins as a handle resize, a layer move, or a deselect.
+    /// Decide whether the gesture begins as a handle resize, a layer move, a marquee, or a
+    /// deselect. Honours the Cmd modifier for additive selection.
     private func startInteraction(at screenStart: CGPoint) {
         let canvasStart = toCanvas(screenStart)
-        // Prefer hitting a handle of the currently-selected layer.
-        if let sel = document.selectedLayerId,
-           let layer = document.selectedPage.layer(id: sel),
+        let cmdHeld = NSEvent.modifierFlags.contains(.command)
+
+        // Handle resize takes priority — only valid when exactly one layer is selected.
+        if document.selectedLayerIds.count == 1,
+           let sel = document.selectedLayerIds.first,
+           let layer = findLayer(id: sel),
            let handle = handleHit(local: canvasStart, frame: layer.frame) {
             document.beginUndoableEdit()
             interaction = .resizing(layerId: layer.id, handle: handle,
                                     start: layer.frame, startPoint: canvasStart)
             return
         }
-        // Otherwise hit-test layers.
+
         if let hit = hitTestLayer(local: canvasStart) {
-            document.selectedLayerId = hit.id
+            if cmdHeld {
+                // Cmd-click: toggle this layer in the selection. Don't start a move so the user
+                // can build up a multi-selection without dragging anything.
+                document.toggleSelection(hit.id)
+                interaction = .idle
+                return
+            }
+            // Plain click: if the hit isn't already part of the selection, replace selection
+            // with just it. Either way, start moving every selected layer together.
+            if !document.selectedLayerIds.contains(hit.id) {
+                document.selectedLayerIds = [hit.id]
+            }
+            let movingIds = topLevelSelection(document.selectedLayerIds)
+            var starts: [String: Frame] = [:]
+            for id in movingIds {
+                if let layer = findLayer(id: id) { starts[id] = layer.frame }
+            }
             document.beginUndoableEdit()
-            interaction = .moving(layerId: hit.id, start: hit.frame, startPoint: canvasStart)
+            interaction = .moving(layerIds: movingIds, starts: starts, startPoint: canvasStart)
             return
         }
-        // Tap on empty canvas → clear selection (so page settings show).
-        document.selectedLayerId = nil
-        interaction = .idle
+
+        // Click on empty canvas → start a marquee. Cmd-held keeps the current selection as a
+        // base; otherwise the previous selection is cleared on first drag tick.
+        let baseSelection = cmdHeld ? document.selectedLayerIds : []
+        if !cmdHeld { document.selectedLayerIds = [] }
+        interaction = .marquee(origin: canvasStart, current: canvasStart,
+                               additive: cmdHeld, baseSelection: baseSelection)
     }
 
     private func applyInteraction(currentLocation: CGPoint) {
@@ -184,16 +278,27 @@ struct CanvasView: View {
         switch interaction {
         case .idle:
             return
-        case .moving(let id, let start, let startPoint):
-            let dx = canvasNow.x - startPoint.x
-            let dy = canvasNow.y - startPoint.y
+        case .moving(let ids, let starts, let startPoint):
+            let dx = Double(canvasNow.x - startPoint.x)
+            let dy = Double(canvasNow.y - startPoint.y)
             var working = document.document
-            _ = try? CommandEngine.apply(
-                .move(pageId: document.selectedPageId, id: id,
-                      to: (start.x + Double(dx), start.y + Double(dy))),
-                to: &working)
-            document.objectWillChange.send()
+            for id in ids {
+                guard let start = starts[id] else { continue }
+                _ = try? CommandEngine.apply(
+                    .move(pageId: document.selectedPageId, id: id,
+                          to: (start.x + dx, start.y + dy)),
+                    to: &working)
+            }
+            // Assigning the @Published `document` already emits objectWillChange; the render is
+            // scheduled off the main thread via the renderKey `.onChange`.
             document.document = working
+        case .marquee(let origin, _, let additive, let baseSelection):
+            // Update the marquee's current corner and recompute the live selection.
+            interaction = .marquee(origin: origin, current: canvasNow,
+                                   additive: additive, baseSelection: baseSelection)
+            let rect = marqueeRect(origin: origin, current: canvasNow)
+            let intersecting = Set(marqueeHits(in: rect).map(\.id))
+            document.selectedLayerIds = additive ? baseSelection.union(intersecting) : intersecting
         case .resizing(let id, let handle, let start, let startPoint):
             let dx = Double(canvasNow.x - startPoint.x)
             let dy = Double(canvasNow.y - startPoint.y)
@@ -215,16 +320,18 @@ struct CanvasView: View {
             _ = try? CommandEngine.apply(
                 .setFrame(pageId: document.selectedPageId, id: id, frame: newFrame),
                 to: &working)
-            document.objectWillChange.send()
             document.document = working
         }
     }
 
     // MARK: - Hit testing
 
-    /// Convert a coordinate inside the padded ZStack into canvas (pixel) space.
-    private func toCanvas(_ p: CGPoint) -> CGPoint {
-        CGPoint(x: (p.x - canvasInset) / zoom, y: (p.y - canvasInset) / zoom)
+    /// Canvas-pixel location of the pointer. Reads the live AppKit mouse position (which handles
+    /// magnification, scroll, and coordinate-origin correctly); the SwiftUI gesture point is only
+    /// a fallback before the scroll view is wired up.
+    private func toCanvas(_ fallback: CGPoint) -> CGPoint {
+        geometry.canvasPointAtMouse()
+            ?? CGPoint(x: fallback.x - canvasInset, y: fallback.y - canvasInset)
     }
 
     private func hitTestLayer(local: CGPoint) -> Layer? {
@@ -248,6 +355,30 @@ struct CanvasView: View {
             if dx <= halfSizeCanvas * hx && dy <= halfSizeCanvas * hy { return handle }
         }
         return nil
+    }
+}
+
+/// Bridges AppKit coordinate conversion into the SwiftUI canvas. Holds a weak reference to the
+/// live `NSScrollView` (set by `ZoomScrollView`) so a pointer location in window space can be
+/// converted to canvas pixels through the actual magnification + scroll offset — which is the
+/// only reliable source here. (`GeometryReader.frame(in: .global)` returns zero inside the
+/// hosted scroll view, and assuming gestures arrive in canvas units breaks at zoom ≠ 1.)
+final class CanvasGeometry {
+    weak var scrollView: NSScrollView?
+    var inset: CGFloat = 40
+
+    /// Canvas-pixel location of the pointer, read straight from AppKit. We deliberately use
+    /// `NSEvent.mouseLocation` (true screen coords) rather than SwiftUI's gesture `.global` point:
+    /// SwiftUI reports top-left / y-down window coords, but `NSView.convert(_:from:)` expects
+    /// AppKit's bottom-left / y-up window coords, and that origin mismatch inverted Y. Going
+    /// screen → window → documentView keeps every origin consistent, and `convert` applies the
+    /// scroll view's magnification + scroll. The hosting view is flipped, so the result is already
+    /// top-left; subtracting the outer inset yields canvas pixels. Returns nil until wired up.
+    func canvasPointAtMouse() -> CGPoint? {
+        guard let scroll = scrollView, let win = scroll.window, let doc = scroll.documentView else { return nil }
+        let inWindow = win.convertPoint(fromScreen: NSEvent.mouseLocation)
+        let inDoc = doc.convert(inWindow, from: nil)
+        return CGPoint(x: inDoc.x - inset, y: inDoc.y - inset)
     }
 }
 
@@ -419,35 +550,38 @@ enum Handle: Identifiable, CaseIterable {
 private struct HandleView: View {
     let handle: Handle
     let isActive: Bool
+    /// Current canvas magnification. Handles draw in canvas units, but we want their
+    /// on-screen size to stay the same regardless of zoom — so every dimension is divided by
+    /// `zoom` here. (The renderer's NSScrollView magnifies the whole hosted view, including
+    /// these handles; dividing by `zoom` cancels out that magnification.)
+    let zoom: CGFloat
 
     var body: some View {
+        let z = max(zoom, 0.001)
         switch handle {
         case .topLeft, .topRight, .bottomLeft, .bottomRight:
-            // Square corner handle
-            RoundedRectangle(cornerRadius: 2)
+            RoundedRectangle(cornerRadius: 2 / z)
                 .fill(Color.white)
-                .frame(width: 11, height: 11)
+                .frame(width: 11 / z, height: 11 / z)
                 .overlay(
-                    RoundedRectangle(cornerRadius: 2)
-                        .stroke(Color.accentColor, lineWidth: 1.5)
+                    RoundedRectangle(cornerRadius: 2 / z)
+                        .stroke(Color.accentColor, lineWidth: 1.5 / z)
                 )
-                .shadow(color: .black.opacity(0.25), radius: 1, x: 0, y: 0.5)
+                .shadow(color: .black.opacity(0.25), radius: 1 / z, x: 0, y: 0.5 / z)
                 .scaleEffect(isActive ? 1.15 : 1.0)
         case .top, .bottom:
-            // Horizontal capsule
             Capsule()
                 .fill(Color.white)
-                .frame(width: 22, height: 8)
-                .overlay(Capsule().stroke(Color.accentColor, lineWidth: 1.5))
-                .shadow(color: .black.opacity(0.25), radius: 1, x: 0, y: 0.5)
+                .frame(width: 22 / z, height: 8 / z)
+                .overlay(Capsule().stroke(Color.accentColor, lineWidth: 1.5 / z))
+                .shadow(color: .black.opacity(0.25), radius: 1 / z, x: 0, y: 0.5 / z)
                 .scaleEffect(isActive ? 1.15 : 1.0)
         case .left, .right:
-            // Vertical capsule
             Capsule()
                 .fill(Color.white)
-                .frame(width: 8, height: 22)
-                .overlay(Capsule().stroke(Color.accentColor, lineWidth: 1.5))
-                .shadow(color: .black.opacity(0.25), radius: 1, x: 0, y: 0.5)
+                .frame(width: 8 / z, height: 22 / z)
+                .overlay(Capsule().stroke(Color.accentColor, lineWidth: 1.5 / z))
+                .shadow(color: .black.opacity(0.25), radius: 1 / z, x: 0, y: 0.5 / z)
                 .scaleEffect(isActive ? 1.15 : 1.0)
         }
     }
@@ -459,7 +593,6 @@ private struct HandleView: View {
 /// non-bezel layer or on empty canvas, falls back to adding a regular image layer at that point.
 struct ImageDropDelegate: DropDelegate {
     let document: ProjectDocument
-    let zoom: CGFloat
     let canvasOriginInset: CGFloat
     @Binding var highlightedLayerId: String?
 
@@ -510,8 +643,10 @@ struct ImageDropDelegate: DropDelegate {
     }
 
     private func canvasPoint(from screenPoint: CGPoint) -> CGPoint {
-        CGPoint(x: (screenPoint.x - canvasOriginInset) / zoom,
-                y: (screenPoint.y - canvasOriginInset) / zoom)
+        // Drop locations come in the SwiftUI host's coordinate space, which equals canvas
+        // pixels because NSScrollView magnification scales the whole hosted view. Just undo
+        // the `.padding(canvasInset)` offset to land on the canvas's (0, 0).
+        CGPoint(x: screenPoint.x - canvasOriginInset, y: screenPoint.y - canvasOriginInset)
     }
 
     private func topmostBezel(at point: CGPoint) -> Layer? {
@@ -536,82 +671,328 @@ struct ImageDropDelegate: DropDelegate {
         if document.document.assets[assetId] == nil {
             _ = document.mutate(.addAsset(id: assetId, path: fileURL.path))
         }
-        let w: Double = 600
-        let h: Double = 600
+        // Frame size = the image's natural pixel dimensions (capped to canvas).
+        let canvas = document.selectedPage.canvas
+        let natural = ProjectAssetHelper.naturalImageDefaultSize(fileURL: fileURL, canvas: canvas)
+        let w = natural?.w ?? 600
+        let h = natural?.h ?? 600
+        // Centre the new image on the drop point.
         let frame = Frame(x: point.x - w / 2, y: point.y - h / 2, w: w, h: h)
+        // contentMode = .stretch so resizing the frame deforms the image directly.
         let r = document.mutate(.addImage(pageId: document.selectedPageId, id: nil,
-                                          assetId: assetId, frame: frame, contentMode: .fit, z: nil))
+                                          assetId: assetId, frame: frame, contentMode: .stretch, z: nil))
         document.selectedLayerId = r?.newLayerId
     }
 }
 
 struct CheckerboardView: View {
-    let size: CGFloat = 16
     var body: some View {
-        Canvas { ctx, area in
-            let cols = Int(area.width / size) + 1
-            let rows = Int(area.height / size) + 1
-            for r in 0..<rows {
-                for c in 0..<cols {
-                    let isDark = (r + c) % 2 == 0
-                    let rect = CGRect(x: CGFloat(c) * size, y: CGFloat(r) * size, width: size, height: size)
-                    ctx.fill(Path(rect), with: .color(isDark ? Color(white: 0.18) : Color(white: 0.22)))
-                }
-            }
-        }
+        // A single small tile repeated to fill the frame. A previous implementation drew the
+        // whole board with one SwiftUI `Canvas`, but at App-Store work-area sizes (a 1290×2796
+        // preview expands the canvas to ~3870×5592 pt) a Canvas that large fails to fill its
+        // frame and renders only a small top-left patch. Tiling a 32×32 image via AppKit fills
+        // any size cheaply and correctly.
+        Image(nsImage: Self.tile)
+            .resizable(resizingMode: .tile)
     }
+
+    /// A 2×2 checkerboard cell (16 pt squares) used as the repeating tile.
+    private static let tile: NSImage = {
+        let cell: CGFloat = 16
+        let img = NSImage(size: NSSize(width: cell * 2, height: cell * 2))
+        img.lockFocus()
+        NSColor(white: 0.22, alpha: 1).setFill()
+        NSRect(x: 0, y: 0, width: cell * 2, height: cell * 2).fill()
+        NSColor(white: 0.18, alpha: 1).setFill()
+        NSRect(x: 0, y: 0, width: cell, height: cell).fill()
+        NSRect(x: cell, y: cell, width: cell, height: cell).fill()
+        img.unlockFocus()
+        return img
+    }()
 }
 
 private extension CanvasView {
     /// Interaction states for the canvas drag gesture.
     enum Interaction {
         case idle
-        case moving(layerId: String, start: Frame, startPoint: CGPoint)
+        /// Multi-layer move. `layerIds` are the layers being translated; `starts` captures their
+        /// original frames at drag start so each tick can recompute from the cursor delta.
+        case moving(layerIds: [String], starts: [String: Frame], startPoint: CGPoint)
         case resizing(layerId: String, handle: Handle, start: Frame, startPoint: CGPoint)
+        /// Marquee selection rectangle drag. `baseSelection` is the selection at drag start
+        /// (preserved when `additive` = Cmd was held).
+        case marquee(origin: CGPoint, current: CGPoint, additive: Bool, baseSelection: Set<String>)
     }
 }
 
-/// Caches per-page rendered NSImages so tab-switching back to an unchanged page is essentially
-/// free, and so back-to-back body recomputations during a drag don't pay the full render cost
-/// when only an unrelated piece of state has changed. The cache key is `(pageId, page state,
-/// asset dictionary, baseDirectory)` — anything that affects the rendered output. During a
-/// resize the page state changes every tick so we still re-render that one page, but the bezel
-/// composites it uses come from BezelImageStore's internal cache, so each render is cheap.
-final class PageRenderCache {
-    private struct Entry {
-        let page: Page
-        let assets: [String: Asset]
-        let baseDirectory: URL?
-        let image: NSImage
+// MARK: - Marquee + multi-select helpers
+
+private extension CanvasView {
+    func marqueeRect(origin: CGPoint, current: CGPoint) -> CGRect {
+        CGRect(x: min(origin.x, current.x),
+               y: min(origin.y, current.y),
+               width: abs(current.x - origin.x),
+               height: abs(current.y - origin.y))
     }
 
-    private var entries: [String: Entry] = [:]
-    private let capacity = 12
+    /// Layers (top-level only) whose frames intersect the marquee rect.
+    func marqueeHits(in rect: CGRect) -> [Layer] {
+        document.selectedPage.renderOrder
+            .filter { $0.visible }
+            .filter { $0.frame.cgRect.intersects(rect) }
+    }
 
-    func render(document: Document, pageId: String, baseDirectory: URL?) -> NSImage? {
-        let page = document.page(id: pageId) ?? document.activePage
-        let assets = document.assets
+    /// Filter `ids` to drop any layer whose ancestor is also in the set — prevents a multi-move
+    /// from translating a child twice when both the group AND a child are selected (the group
+    /// move already cascades through children via CommandEngine.translate).
+    func topLevelSelection(_ ids: Set<String>) -> [String] {
+        let layers = document.selectedPage.layers
+        var result: [String] = []
+        for id in ids {
+            if !hasSelectedAncestor(id, in: layers, selection: ids) {
+                result.append(id)
+            }
+        }
+        return result
+    }
 
-        if let entry = entries[pageId],
-           entry.page == page,
-           entry.assets == assets,
-           entry.baseDirectory == baseDirectory {
-            return entry.image
+    private func hasSelectedAncestor(_ id: String, in layers: [Layer], selection: Set<String>) -> Bool {
+        // Walk the tree; an ancestor is any group on the path from root to the target.
+        func walk(_ ls: [Layer], path: [String]) -> Bool {
+            for l in ls {
+                if l.id == id {
+                    return path.contains(where: { selection.contains($0) })
+                }
+                if case .group(let g) = l.payload {
+                    if walk(g.children, path: path + [l.id]) { return true }
+                }
+            }
+            return false
         }
+        return walk(layers, path: [])
+    }
+}
 
-        let renderer = Renderer(baseDirectory: baseDirectory)
-        guard let img = try? renderer.renderNSImage(document, scale: 1, pageId: pageId) else {
-            return nil
+/// Renders the editor canvas off the main thread, coalesced, at the on-screen zoom resolution.
+///
+/// The canvas used to rasterize the entire ~21 MP work-area canvas at full resolution,
+/// synchronously, inside the SwiftUI body — so every edit and every drag tick froze the UI on
+/// large projects. This coordinator fixes that with three levers:
+///
+///   1. **Display-resolution rendering.** It renders at `renderScale(zoom:)` — capped at 1.0,
+///      so it never produces more pixels than the canvas, and shrunk proportionally when the
+///      user is zoomed out (the common case: the default zoom is 25%). At 25% that's ~16× fewer
+///      pixels. The NSImage is still sized to the full canvas in points, so NSScrollView's
+///      magnification and all overlay geometry are unchanged.
+///   2. **Off-main + coalesced.** Renders run on a serial background queue. Body only ever reads
+///      the last completed `image`. While a render is in flight, only the newest request is kept
+///      (`pending`); a burst of drag ticks collapses to "render the latest, drop the rest", so
+///      the main thread never blocks and the queue never backs up.
+///   3. **Draft during interaction.** While moving/resizing, a coarser draft scale makes each
+///      tick cheap; releasing flips back to the crisp scale and triggers one final render.
+///
+/// The render cache keys on the document's monotonic `revision` (not a deep `Page ==`), so the
+/// hot-path dedupe is O(1). The pure `Renderer` struct, `CGImageCache`, and `BezelImageStore`
+/// are all safe to use from the background queue.
+final class CanvasRenderer: ObservableObject {
+    @Published private(set) var image: NSImage?
+
+    /// Identifies a renderable canvas state. Equatable so `.onChange` fires only when the pixels
+    /// must change. `scaleMilli` is the render scale × 1000 (quantized) so nearby zoom levels and
+    /// draft/crisp transitions are distinguished without re-rendering on sub-pixel zoom jitter.
+    struct Key: Hashable {
+        let pageId: String
+        let revision: Int
+        let scaleMilli: Int
+        let baseDir: URL?
+    }
+
+    private struct Request {
+        let key: Key
+        let document: Document
+        let pageId: String
+        let scale: CGFloat
+        let canvasSize: CGSize
+        let baseDir: URL?
+    }
+
+    /// Render pixel scale for a zoom level. Capped at 1.0 (never more pixels than the canvas) and
+    /// quantized to quarter steps, rounded UP so the idle image is at least as dense as the
+    /// display (never upscaled → stays crisp). During an active move/resize a coarser draft is
+    /// used so each tick is cheap; releasing re-requests at the crisp scale.
+    static func renderScale(zoom: CGFloat, interacting: Bool) -> CGFloat {
+        let z = min(max(zoom, 0.01), 1.0)
+        let crisp = min(1.0, ceil(z / 0.25) * 0.25)   // 0.25, 0.5, 0.75, 1.0
+        // During a move/resize, draft at 75% of the crisp scale — half the resolution drop of a
+        // 0.5 draft, so the dip in sharpness while dragging is much less noticeable while each
+        // synchronous render stays well under a frame.
+        return interacting ? max(0.1875, crisp * 0.75) : crisp
+    }
+
+    private let queue = DispatchQueue(label: "io.tuist.AIImageEditor.canvasRender", qos: .userInitiated)
+    private var inFlight = false
+    private var pending: Request?
+    private var shownKey: Key?
+    // Small LRU of completed images so page-switches / zoom-bucket returns are instant.
+    private var cache: [Key: NSImage] = [:]
+    private var cacheOrder: [Key] = []
+    private let cacheCapacity = 12
+
+    /// Ask for a render of the given state. Cheap and idempotent: returns immediately if the
+    /// state is already shown or cached, coalesces while a render is in flight, and renders the
+    /// very first frame synchronously so opening a document shows the canvas without a gray flash.
+    func request(document: Document, pageId: String, canvasSize: CGSize,
+                 revision: Int, zoom: CGFloat, interacting: Bool, baseDirectory: URL?) {
+        let scale = Self.renderScale(zoom: zoom, interacting: interacting)
+        let key = Key(pageId: pageId, revision: revision,
+                      scaleMilli: Int((scale * 1000).rounded()), baseDir: baseDirectory)
+        if key == shownKey { return }
+        if let cached = cache[key] {
+            image = cached
+            shownKey = key
+            return
         }
-        entries[pageId] = Entry(page: page, assets: assets, baseDirectory: baseDirectory, image: img)
-        // Simple eviction — drop oldest entries when we run over capacity.
-        if entries.count > capacity {
-            let drop = entries.keys.prefix(entries.count - capacity)
-            for k in drop { entries.removeValue(forKey: k) }
+        let req = Request(key: key, document: document, pageId: pageId,
+                          scale: scale, canvasSize: canvasSize, baseDir: baseDirectory)
+        // Render inline (on the main thread) for the first paint AND during an active move/resize:
+        // the draft scale is cheap (well under a frame), so a synchronous render keeps the dragged
+        // content locked to the cursor with no async lag. Idle/crisp renders go off-main coalesced.
+        if image == nil || interacting {
+            if let img = Self.render(req) { publish(img, for: req.key) }
+            return
         }
+        if inFlight { pending = req; return }
+        start(req)
+    }
+
+    private func start(_ req: Request) {
+        inFlight = true
+        queue.async { [weak self] in
+            let img = Self.render(req)
+            DispatchQueue.main.async {
+                guard let self else { return }
+                if let img { self.publish(img, for: req.key) }
+                self.inFlight = false
+                if let next = self.pending {
+                    self.pending = nil
+                    self.start(next)
+                }
+            }
+        }
+    }
+
+    /// Pure render → NSImage. Safe to call on any thread: `Renderer` is a stateless value type and
+    /// the caches it touches (`CGImageCache`, `BezelImageStore`) are internally serialized.
+    private static func render(_ req: Request) -> NSImage? {
+        guard let cg = try? Renderer(baseDirectory: req.baseDir)
+            .renderCGImage(req.document, pixelScale: req.scale, pageId: req.pageId, mode: .editor)
+        else { return nil }
+        let img = NSImage(size: NSSize(width: req.canvasSize.width, height: req.canvasSize.height))
+        img.addRepresentation(NSBitmapImageRep(cgImage: cg))
         return img
     }
 
-    func invalidate(pageId: String) { entries.removeValue(forKey: pageId) }
-    func invalidateAll() { entries.removeAll() }
+    private func publish(_ img: NSImage, for key: Key) {
+        if cache[key] == nil { cacheOrder.append(key) }
+        cache[key] = img
+        while cacheOrder.count > cacheCapacity {
+            let evict = cacheOrder.removeFirst()
+            if evict != key { cache.removeValue(forKey: evict) }
+        }
+        image = img
+        shownKey = key
+    }
+}
+
+// MARK: - Zoomable scroll container
+
+/// Hosts a SwiftUI canvas inside an `NSScrollView` with native magnification. NSScrollView's
+/// pinch handling anchors the zoom on the cursor / pinch center for free — much closer to the
+/// behaviour of any other macOS canvas tool than SwiftUI's stock `ScrollView` can offer (its
+/// content offset isn't programmatically writable on macOS 13, so we'd have nothing to "pin"
+/// when zooming).
+///
+/// The hosted SwiftUI content draws everything in **canvas-pixel** coordinates; the scroll
+/// view's magnification is what scales it on screen. The `zoom` binding is kept in sync
+/// bidirectionally — slider/keyboard updates land via `updateNSView`, and trackpad pinch
+/// pushes back via `didLiveMagnify` / `didEndLiveMagnify` notifications.
+struct ZoomScrollView<Content: View>: NSViewRepresentable {
+    let contentSize: CGSize
+    @Binding var zoom: CGFloat
+    let geometry: CanvasGeometry
+    let content: () -> Content
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
+    func makeNSView(context: Context) -> NSScrollView {
+        let scroll = NSScrollView()
+        scroll.allowsMagnification = true
+        scroll.minMagnification = 0.05
+        scroll.maxMagnification = 4.0
+        scroll.magnification = zoom
+        scroll.hasHorizontalScroller = true
+        scroll.hasVerticalScroller = true
+        scroll.autohidesScrollers = true
+        scroll.drawsBackground = true
+        scroll.backgroundColor = NSColor(white: 0.1, alpha: 1)
+
+        let hosting = NSHostingView(rootView: content())
+        hosting.frame = CGRect(origin: .zero, size: contentSize)
+        scroll.documentView = hosting
+        geometry.scrollView = scroll
+
+        context.coordinator.scroll = scroll
+        context.coordinator.zoom = $zoom
+        context.coordinator.attach()
+        return scroll
+    }
+
+    func updateNSView(_ scroll: NSScrollView, context: Context) {
+        geometry.scrollView = scroll
+        if let host = scroll.documentView as? NSHostingView<Content> {
+            host.rootView = content()
+            if host.frame.size != contentSize {
+                host.frame = CGRect(origin: .zero, size: contentSize)
+            }
+        }
+        // Apply external zoom changes (toolbar slider, keyboard shortcuts). Compare with a
+        // small tolerance so we don't loop with the coordinator's own zoom updates.
+        if abs(scroll.magnification - zoom) > 0.0005 {
+            scroll.magnification = zoom
+        }
+    }
+
+    final class Coordinator: NSObject {
+        weak var scroll: NSScrollView?
+        var zoom: Binding<CGFloat>?
+        private var observation: NSKeyValueObservation?
+
+        func attach() {
+            guard let scroll = scroll else { return }
+            // KVO on `magnification` fires continuously during pinch, plus we also catch the
+            // end event in case AppKit ever skips a final update.
+            observation = scroll.observe(\.magnification, options: [.new]) { [weak self] _, change in
+                guard let self, let zoom = self.zoom, let m = change.newValue else { return }
+                if abs(zoom.wrappedValue - m) > 0.0005 {
+                    DispatchQueue.main.async { zoom.wrappedValue = m }
+                }
+            }
+            NotificationCenter.default.addObserver(
+                self, selector: #selector(magnifyEnded),
+                name: NSScrollView.didEndLiveMagnifyNotification, object: scroll)
+        }
+
+        @objc private func magnifyEnded() {
+            guard let scroll = scroll, let zoom = zoom else { return }
+            let m = scroll.magnification
+            if abs(zoom.wrappedValue - m) > 0.0005 {
+                DispatchQueue.main.async { zoom.wrappedValue = m }
+            }
+        }
+
+        deinit {
+            observation?.invalidate()
+            NotificationCenter.default.removeObserver(self)
+        }
+    }
 }
