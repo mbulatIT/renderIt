@@ -8,7 +8,7 @@ import ImageIO
 public final class CGImageCache: @unchecked Sendable {
     public static let shared = CGImageCache(capacity: 96)
 
-    private let queue = DispatchQueue(label: "io.tuist.AIImageEditorCore.imageCache")
+    private let queue = DispatchQueue(label: "com.bulat.aiimageeditor.imageCache")
     private var cache: [String: CGImage] = [:]
     private var order: [String] = []
     private let capacity: Int

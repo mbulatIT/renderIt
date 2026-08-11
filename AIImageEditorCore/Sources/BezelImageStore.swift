@@ -31,7 +31,7 @@ public final class BezelImageStore {
     /// `<deviceId>::<color>::<screenshotURL or empty>` → fully-composed bezel image at chrome
     /// native pixel size. Lets the renderer just blit-with-scale on every frame.
     private var compositeCache: [String: CGImage] = [:]
-    private let queue = DispatchQueue(label: "io.tuist.AIImageEditorCore.bezelStore")
+    private let queue = DispatchQueue(label: "com.bulat.aiimageeditor.bezelStore")
 
     public var allDeviceIds: [String] { Array(entries.keys) }
     public var allDevices: [DeviceEntry] {

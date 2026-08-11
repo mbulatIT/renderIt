@@ -829,7 +829,7 @@ final class CanvasRenderer: ObservableObject {
         return interacting ? max(0.1875, crisp * 0.75) : crisp
     }
 
-    private let queue = DispatchQueue(label: "io.tuist.AIImageEditor.canvasRender", qos: .userInitiated)
+    private let queue = DispatchQueue(label: "com.bulat.aiimageeditor.canvasRender", qos: .userInitiated)
     private var inFlight = false
     private var pending: Request?
     private var shownKey: Key?

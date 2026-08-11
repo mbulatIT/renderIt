@@ -4,7 +4,7 @@ import AIImageEditorCore
 
 /// Custom pasteboard type for layers (JSON-encoded Layer).
 enum LayerClipboard {
-    static let pasteboardType = NSPasteboard.PasteboardType("io.tuist.AIImageEditor.layer")
+    static let pasteboardType = NSPasteboard.PasteboardType("com.bulat.aiimageeditor.layer")
 
     static func copy(_ layer: Layer) {
         guard let data = try? JSONEncoder().encode(layer) else { return }

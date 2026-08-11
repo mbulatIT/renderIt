@@ -28,6 +28,7 @@ Start with the TODO list, then read by topic. Each doc is small and self-contain
 | [docs/COMMAND_REFERENCE.md](docs/COMMAND_REFERENCE.md) | Every command (CLI + MCP), arguments, examples. Single source of truth. |
 | [docs/CLI_GUIDE.md](docs/CLI_GUIDE.md) | How to install/invoke the CLI, end-to-end scripted workflow. |
 | [docs/MCP_GUIDE.md](docs/MCP_GUIDE.md) | How to register the MCP server in Claude Desktop / Claude Code. |
+| [docs/PUBLISHING.md](docs/PUBLISHING.md) | Signed + notarized Developer ID distribution (DMG via `Scripts/release.sh`). |
 | [docs/DEVICE_BEZELS.md](docs/DEVICE_BEZELS.md) | Built-in device frames (iPhone, iPad, Mac), aspect ratios, screen insets. |
 | [docs/PRESETS.md](docs/PRESETS.md) | App Store screenshot sizes, ready-made canvas presets. |
 | [docs/FEATURES.md](docs/FEATURES.md) | Per-feature breakdowns and acceptance criteria. |

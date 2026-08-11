@@ -72,16 +72,22 @@ tuist generate
 
 # 2. Build the GUI app
 xcodebuild -workspace AIImageEditor.xcworkspace \
-           -scheme AIImageEditor -configuration Debug build
+           -scheme AIImageEditor -configuration Debug \
+           -derivedDataPath Derived build
 
 # 3. Build the CLI and MCP server
 xcodebuild -workspace AIImageEditor.xcworkspace \
-           -scheme aiimageeditor-cli -configuration Release build
+           -scheme aiimageeditor-cli -configuration Release \
+           -derivedDataPath Derived build
 xcodebuild -workspace AIImageEditor.xcworkspace \
-           -scheme aiimageeditor-mcp -configuration Release build
+           -scheme aiimageeditor-mcp -configuration Release \
+           -derivedDataPath Derived build
 ```
 
-Binaries land in `Derived/Build/Products/Release/` (Xcode normalises dashes to underscores on disk — the file is `aiimageeditor_cli`, not `aiimageeditor-cli`).
+Binaries land in `Derived/Build/Products/Release/` (the `-derivedDataPath Derived`
+flag keeps them project-local — omit it and Xcode uses `~/Library/Developer/Xcode/DerivedData/`
+instead; Xcode also normalises dashes to underscores on disk — the file is
+`aiimageeditor_cli`, not `aiimageeditor-cli`).
 
 ### Install on `$PATH`
 
@@ -324,6 +330,7 @@ Deeper dive: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 | [docs/COMMAND_REFERENCE.md](docs/COMMAND_REFERENCE.md) | Every command (CLI + MCP), arguments, examples. |
 | [docs/CLI_GUIDE.md](docs/CLI_GUIDE.md) | End-to-end scripted workflow. |
 | [docs/MCP_GUIDE.md](docs/MCP_GUIDE.md) | Protocol details and host registration. |
+| [docs/PUBLISHING.md](docs/PUBLISHING.md) | Signed + notarized Developer ID distribution (DMG). |
 | [docs/DEVICE_BEZELS.md](docs/DEVICE_BEZELS.md) | Built-in device frames, aspect ratios, screen insets. |
 | [docs/PRESETS.md](docs/PRESETS.md) | App Store screenshot sizes, ready-made canvas presets. |
 | [docs/FEATURES.md](docs/FEATURES.md) | Per-feature breakdowns and acceptance criteria. |

@@ -28,9 +28,11 @@ tuist generate
 
 # 3. Собрать CLI и MCP-сервер
 xcodebuild -workspace AIImageEditor.xcworkspace \
-           -scheme aiimageeditor-cli -configuration Release build
+           -scheme aiimageeditor-cli -configuration Release \
+           -derivedDataPath Derived build
 xcodebuild -workspace AIImageEditor.xcworkspace \
-           -scheme aiimageeditor-mcp -configuration Release build
+           -scheme aiimageeditor-mcp -configuration Release \
+           -derivedDataPath Derived build
 
 # 4. Положить бинари на $PATH
 #    (Xcode заменяет дефисы на подчёркивания в именах файлов — это не ошибка)
@@ -42,7 +44,8 @@ sudo cp Derived/Build/Products/Release/aiimageeditor_mcp /usr/local/bin/aiimagee
 
 ```bash
 xcodebuild -workspace AIImageEditor.xcworkspace \
-           -scheme AIImageEditor -configuration Release build
+           -scheme AIImageEditor -configuration Release \
+           -derivedDataPath Derived build
 open Derived/Build/Products/Release/AIImageEditor.app
 ```
 
@@ -140,6 +143,7 @@ aiimageeditor-cli render --project hero.aiproj --output hero.png
 |---|---|
 | [docs/COMMAND_REFERENCE.md](docs/COMMAND_REFERENCE.md) | Все команды CLI/MCP с аргументами и примерами |
 | [docs/MCP_GUIDE.md](docs/MCP_GUIDE.md) | Детали протокола MCP и регистрация сервера |
+| [docs/PUBLISHING.md](docs/PUBLISHING.md) | Подписанная дистрибуция: DMG с нотаризацией (без Xcode у получателя) |
 | [docs/FILE_FORMAT.md](docs/FILE_FORMAT.md) | Полная схема `.aiproj` JSON |
 | [docs/DEVICE_BEZELS.md](docs/DEVICE_BEZELS.md) | Список безелей и их геометрия |
 | [docs/PRESETS.md](docs/PRESETS.md) | Размеры скриншотов App Store |

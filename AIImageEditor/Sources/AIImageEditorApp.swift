@@ -3,7 +3,7 @@ import UniformTypeIdentifiers
 import AIImageEditorCore
 
 extension UTType {
-    static let aiproj = UTType(exportedAs: "io.tuist.AIImageEditor.aiproj")
+    static let aiproj = UTType(exportedAs: "com.bulat.aiimageeditor.aiproj")
 }
 
 @main
