@@ -1162,7 +1162,6 @@ enum Tools {
             ]),
             "start": stringSchema("\"x,y\" normalized 0..1 (default 0,0)"),
             "end": stringSchema("\"x,y\" normalized 0..1 (default 0,1)"),
-            "corner_radius": numberSchema(),
             "frame": stringSchema("\"x,y,w,h\""),
             "at": stringSchema(),
             "size": stringSchema(),
